@@ -950,17 +950,16 @@ body.detail-open { overflow: hidden; }
   }
 
   .pager {
-    position: sticky;
-    bottom: calc(4.25rem + env(safe-area-inset-bottom));
-    z-index: 4;
+    position: static;
+    z-index: auto;
     justify-content: space-between;
     gap: 0.5rem;
     margin-top: 1rem;
+    margin-bottom: 0.5rem;
     padding: 0.65rem 0.75rem;
     border: 1px solid var(--line);
     border-radius: 14px;
-    background: rgba(5, 17, 14, 0.94);
-    backdrop-filter: blur(8px);
+    background: rgba(5, 17, 14, 0.88);
   }
 
   .pager button {
