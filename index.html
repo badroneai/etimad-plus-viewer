@@ -8,7 +8,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Markazi+Text:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="stylesheet" href="assets/styles.css?v=5" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="format-detection" content="telephone=no" />
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
@@ -16,7 +19,7 @@
   <header class="hero" id="top">
     <nav class="nav">
       <a class="nav-brand" href="#top">كشاف</a>
-      <div class="nav-links">
+      <div class="nav-links nav-links-desktop">
         <a href="#inventory">المخزون</a>
         <a href="#explorer">المستكشف</a>
         <a href="#missing">الناقص</a>
@@ -69,15 +72,23 @@
 
       <p class="fineprint" id="setMeta"></p>
 
-      <div class="table-wrap">
+      <div class="table-wrap" id="tableWrap">
         <table class="grid" id="grid">
           <thead id="gridHead"></thead>
           <tbody id="gridBody"></tbody>
         </table>
       </div>
+      <div class="card-list" id="cardList" aria-live="polite"></div>
       <div class="pager" id="pager"></div>
     </section>
   </main>
+
+  <nav class="mobile-dock" aria-label="تنقل سريع">
+    <a href="#top">الرئيسية</a>
+    <a href="#inventory">المخزون</a>
+    <a href="#explorer" class="dock-main">المستكشف</a>
+    <a href="#missing">الناقص</a>
+  </nav>
 
   <footer class="footer">
     <p><strong>كشاف</strong> — مرآة استكشافية غير رسمية لبيانات اعتماد بلس. المصدر الرسمي للمشاركة: tenders.etimad.sa</p>
@@ -109,6 +120,6 @@
     </aside>
   </div>
 
-  <script src="assets/app.js?v=4" defer></script>
+  <script src="assets/app.js?v=5" defer></script>
 </body>
 </html>

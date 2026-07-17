@@ -125,6 +125,7 @@
     setMeta: document.getElementById("setMeta"),
     gridHead: document.getElementById("gridHead"),
     gridBody: document.getElementById("gridBody"),
+    cardList: document.getElementById("cardList"),
     pager: document.getElementById("pager"),
     detailRoot: document.getElementById("detailRoot"),
     detailRef: document.getElementById("detailRef"),
@@ -338,6 +339,54 @@
     return keys.map((k) => ({ key: k, label: labelAr(k) }));
   }
 
+  function bilingualTitleBlocks(row) {
+    const en = row.name_en || (row.name_ar ? row.name : null);
+    const ar = row.name_ar;
+    if (ar && en) {
+      return `<span class="name-en" lang="en" dir="ltr">${esc(en)}</span>
+        <span class="name-ar">${esc(ar)}</span>
+        <span class="meta">${esc(row.ref || "")}${row.num ? ` · رقم ${esc(row.num)}` : ""}</span>`;
+    }
+    return `<span class="name-ar">${esc(row.name || row.ref || "—")}</span>
+      <span class="meta">${esc(row.ref || "")}${row.num ? ` · رقم ${esc(row.num)}` : ""}</span>`;
+  }
+
+  function mobileCardHTML(datasetId, cols, row) {
+    const isTender = TENDER_SETS.has(datasetId) && row.ref;
+    let title;
+    if (isTender) title = bilingualTitleBlocks(row);
+    else if (
+      datasetId.startsWith("companies") ||
+      datasetId.startsWith("agencies") ||
+      datasetId === "activities" ||
+      datasetId === "types"
+    ) {
+      title = `<span class="name-ar">${esc(row.name || row.act || row.ref || "—")}</span>`;
+    } else {
+      title = `<span class="name-ar">${esc(row.name || row.ref || row.act || "—")}</span>`;
+    }
+
+    const metaCols = cols.filter((c) => c.key !== "name");
+    const meta = metaCols
+      .map((c) => {
+        let val = cellHTML(datasetId, c, row);
+        // strip nested tender buttons from meta cells
+        if (c.key === "name") return "";
+        if (!val || val === "—") return "";
+        return `<div class="m-field"><span class="m-label">${esc(c.label)}</span><span class="m-value">${val}</span></div>`;
+      })
+      .filter(Boolean)
+      .join("");
+
+    const refAttr = isTender ? ` data-ref="${esc(row.ref)}"` : "";
+    const cta = isTender ? `<span class="m-cta">عرض التفاصيل</span>` : "";
+    return `<article class="m-card${isTender ? " is-tender" : ""}"${refAttr}>
+      <div class="m-card-main">${title}</div>
+      <div class="m-card-fields">${meta}</div>
+      ${cta}
+    </article>`;
+  }
+
   function bilingualNameHTML(row) {
     const en = row.name_en || (row.name_ar ? row.name : null);
     const ar = row.name_ar;
@@ -417,6 +466,7 @@
   function renderMetaFile(json, datasetId) {
     el.filterActivity.hidden = true;
     el.filterType.hidden = true;
+    if (el.cardList) el.cardList.innerHTML = "";
     if (datasetId === "taxonomy_observed") {
       const blocks = ["activities", "types", "agencies", "branches", "winner_companies"]
         .map((k) => {
@@ -494,16 +544,21 @@
     el.gridHead.innerHTML = `<tr>${cols.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr>`;
     if (!slice.length) {
       el.gridBody.innerHTML = `<tr><td colspan="${cols.length}">لا نتائج في هذه المجموعة.</td></tr>`;
+      if (el.cardList) el.cardList.innerHTML = `<p class="empty-hint">لا نتائج في هذه المجموعة.</p>`;
     } else {
       el.gridBody.innerHTML = slice
         .map((row) => {
           const refAttr = row.ref ? ` data-ref="${esc(row.ref)}"` : "";
           const clickable = TENDER_SETS.has(ds.id) && row.ref ? " is-clickable" : "";
           return `<tr class="${clickable}"${refAttr}>${cols
-            .map((c) => `<td>${cellHTML(ds.id, c, row)}</td>`)
+            .map(
+              (c) =>
+                `<td data-label="${esc(c.label)}">${cellHTML(ds.id, c, row)}</td>`
+            )
             .join("")}</tr>`;
         })
         .join("");
+      if (el.cardList) el.cardList.innerHTML = slice.map((row) => mobileCardHTML(ds.id, cols, row)).join("");
     }
 
     el.pager.innerHTML = `
@@ -750,14 +805,15 @@
       renderTable();
     });
 
-    // Robust detail open: row or button
-    el.gridBody.addEventListener("click", (e) => {
+    const openFromRef = (e) => {
       const hit = e.target.closest("[data-ref]");
       if (!hit) return;
       e.preventDefault();
       e.stopPropagation();
       openByRef(hit.getAttribute("data-ref"));
-    });
+    };
+    el.gridBody.addEventListener("click", openFromRef);
+    el.cardList?.addEventListener("click", openFromRef);
 
     el.detailClose.addEventListener("click", closeDetail);
     el.detailBackdrop.addEventListener("click", closeDetail);
