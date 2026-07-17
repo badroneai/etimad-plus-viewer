@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>كشاف — مرصد منافسات اعتماد بلس</title>
-  <meta name="description" content="واجهة استكشافية لعرض بيانات المنافسات الحكومية المجلوبة من مستودع اعتماد بلس." />
+  <title>كشاف — مرآة مستودع اعتماد بلس</title>
+  <meta name="description" content="عرض كامل لكل ما جُلب من مستودع اعتماد بلس: المنافسات، الجهات، الشركات، الأنشطة، وخرائط الموقع." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Markazi+Text:wght@500;600;700&display=swap" rel="stylesheet" />
@@ -17,205 +17,95 @@
     <nav class="nav">
       <a class="nav-brand" href="#top">كشاف</a>
       <div class="nav-links">
-        <a href="#open">المفتوحة</a>
-        <a href="#awarded">المرساة</a>
-        <a href="#agencies">الجهات</a>
-        <a href="#activities">الأنشطة</a>
+        <a href="#inventory">المخزون</a>
+        <a href="#explorer">المستكشف</a>
+        <a href="#missing">الناقص</a>
       </div>
     </nav>
     <div class="hero-stage">
       <p class="brand">كشاف</p>
-      <h1>مرصد حي لمنافسات اعتماد بلس</h1>
-      <p class="lede">التفاصيل تُعرض هنا من بيانات المستودع أولاً. رابط اعتماد الرسمي يظهر كخيار للمشاركة عند الحاجة.</p>
+      <h1>مرآة كاملة لما جُلب من المستودع</h1>
+      <p class="lede">كل طبقة قابلة للعرض مدمجة هنا. اضغط أي منافسة لبطاقة تفاصيل محلية — اعتماد الرسمية زر اختياري للمشاركة.</p>
       <div class="cta-row">
-        <a class="btn primary" href="#open">تصفّح المفتوحة</a>
-        <a class="btn ghost" href="#stats">ملخص الجلب</a>
+        <a class="btn primary" href="#explorer">افتح المستكشف</a>
+        <a class="btn ghost" href="#inventory">عرض المخزون</a>
       </div>
     </div>
   </header>
 
   <main>
-    <section class="section stats" id="stats">
+    <section class="section stats" id="inventory">
       <div class="section-head">
-        <h2>ملخص المخزون المعروض</h2>
-        <p>أرقام من آخر جلب محفوظ — المرساة قد تكون جزئية إذا توقّف التفريغ.</p>
+        <h2>مخزون الجلب المعكوس</h2>
+        <p>أرقام من طبقات المستودع كما حُفظت — لا اختصار للعرض.</p>
       </div>
-      <div class="stat-strip" id="statStrip" aria-live="polite"></div>
+      <div class="stat-strip" id="statStrip"></div>
       <p class="fineprint" id="metaLine"></p>
+      <div class="catalog" id="catalog"></div>
     </section>
 
-    <section class="section" id="open">
+    <section class="section muted" id="missing">
       <div class="section-head">
-        <h2>المنافسات المفتوحة</h2>
-        <p>اضغط اسم المنافسة لفتح بطاقة التفاصيل المحلية — لا يتم التحويل لاعتماد تلقائياً.</p>
+        <h2>ما لم يُجلب بعد</h2>
+        <p>يظهر هنا فقط ما فُقد فعلاً من الجلب — لا نخفي نقصاً.</p>
       </div>
-      <div class="toolbar" data-set="open">
-        <input type="search" class="q" placeholder="بحث بالاسم، الجهة، المرجع…" />
-        <select class="activity"><option value="">كل الأنشطة</option></select>
-        <select class="type"><option value="">كل الأنواع</option></select>
-        <select class="sort">
-          <option value="deadline">الأقرب إغلاقاً</option>
-          <option value="days">الأيام المتبقية</option>
-          <option value="name">الاسم</option>
-        </select>
+      <ul class="missing-list" id="missingList"></ul>
+    </section>
+
+    <section class="section" id="explorer">
+      <div class="section-head">
+        <h2>مستكشف المستودع</h2>
+        <p>اختر أي مجموعة مجلوبة. للمنافسات: التفاصيل محلية أولاً.</p>
       </div>
+
+      <div class="group-tabs" id="groupTabs" role="tablist"></div>
+      <div class="dataset-tabs" id="datasetTabs"></div>
+
+      <div class="toolbar" id="toolbar">
+        <input type="search" id="search" class="q" placeholder="بحث في المجموعة الحالية…" />
+        <select id="filterActivity"><option value="">كل الأنشطة</option></select>
+        <select id="filterType"><option value="">كل الأنواع</option></select>
+      </div>
+
+      <p class="fineprint" id="setMeta"></p>
+
       <div class="table-wrap">
-        <table class="grid" data-table="open">
-          <thead>
-            <tr>
-              <th>المنافسة</th>
-              <th>الجهة / الفرع</th>
-              <th>المنطقة</th>
-              <th>النشاط</th>
-              <th>النوع</th>
-              <th>الإغلاق</th>
-              <th>المتبقي</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
+        <table class="grid" id="grid">
+          <thead id="gridHead"></thead>
+          <tbody id="gridBody"></tbody>
         </table>
       </div>
-      <div class="pager" data-pager="open"></div>
-    </section>
-
-    <section class="section muted" id="horizon">
-      <div class="section-head">
-        <h2>أفق الإغلاق</h2>
-        <p>مجموعات within من نفس نافذة الجلب.</p>
-      </div>
-      <div class="tabs" role="tablist">
-        <button type="button" class="tab on" data-tab="within_7">خلال 7 أيام</button>
-        <button type="button" class="tab" data-tab="within_30">خلال 30 يوماً</button>
-      </div>
-      <div class="toolbar" data-set="horizon">
-        <input type="search" class="q" placeholder="بحث…" />
-        <select class="activity"><option value="">كل الأنشطة</option></select>
-      </div>
-      <div class="table-wrap">
-        <table class="grid" data-table="horizon">
-          <thead>
-            <tr>
-              <th>المنافسة</th>
-              <th>الجهة / الفرع</th>
-              <th>المنطقة</th>
-              <th>النشاط</th>
-              <th>الإغلاق</th>
-              <th>المتبقي</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="pager" data-pager="horizon"></div>
-    </section>
-
-    <section class="section" id="awarded">
-      <div class="section-head">
-        <h2>المرساة / الترسيات</h2>
-        <p id="awardedNote">عيّنة مجلوبة من التفريغ الجزئي — التفاصيل المحلية تتضمن العروض والفائزين عند توفرها.</p>
-      </div>
-      <div class="toolbar" data-set="awarded">
-        <input type="search" class="q" placeholder="بحث…" />
-        <select class="activity"><option value="">كل الأنشطة</option></select>
-        <select class="type"><option value="">كل الأنواع</option></select>
-      </div>
-      <div class="table-wrap">
-        <table class="grid" data-table="awarded">
-          <thead>
-            <tr>
-              <th>المنافسة</th>
-              <th>الجهة / الفرع</th>
-              <th>النشاط</th>
-              <th>العروض</th>
-              <th>الفائز</th>
-              <th>قيمة الترسية</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="pager" data-pager="awarded"></div>
-    </section>
-
-    <section class="section muted" id="agencies">
-      <div class="section-head">
-        <h2>الجهات</h2>
-        <p>من facets المستودع وقت الجلب.</p>
-      </div>
-      <div class="toolbar" data-set="agencies">
-        <input type="search" class="q" placeholder="ابحث عن جهة…" />
-      </div>
-      <div class="table-wrap">
-        <table class="grid" data-table="agencies">
-          <thead><tr><th>#</th><th>الجهة</th><th>العدد</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="pager" data-pager="agencies"></div>
-    </section>
-
-    <section class="section" id="activities">
-      <div class="section-head">
-        <h2>الأنشطة والأنواع</h2>
-        <p>تصنيفات مستخرجة من facets.</p>
-      </div>
-      <div class="split">
-        <div>
-          <h3>الأنشطة</h3>
-          <div class="table-wrap">
-            <table class="grid" data-table="activities">
-              <thead><tr><th>النشاط</th><th>العدد</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-        <div>
-          <h3>الأنواع</h3>
-          <div class="table-wrap">
-            <table class="grid" data-table="types">
-              <thead><tr><th>النوع</th><th>العدد</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <h3 class="mt">أعلى الشركات (SSR)</h3>
-          <div class="table-wrap">
-            <table class="grid" data-table="companies">
-              <thead><tr><th>الشركة</th><th>ترسيات</th><th>مشاركات</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
+      <div class="pager" id="pager"></div>
     </section>
   </main>
 
   <footer class="footer">
-    <p><strong>كشاف</strong> — عرض استكشافي غير رسمي لبيانات مجمّعة من اعتماد بلس. المصدر الرسمي للمشاركة: tenders.etimad.sa</p>
+    <p><strong>كشاف</strong> — مرآة استكشافية غير رسمية لبيانات اعتماد بلس. المصدر الرسمي للمشاركة: tenders.etimad.sa</p>
   </footer>
 
-  <div id="detailRoot" class="detail" hidden>
-    <button type="button" class="detail-backdrop" data-close-detail aria-label="إغلاق"></button>
+  <div id="detailRoot" class="detail" aria-hidden="true">
+    <button type="button" class="detail-backdrop" id="detailBackdrop" aria-label="إغلاق"></button>
     <aside class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
       <header class="detail-head">
         <div class="detail-head-top">
           <span class="detail-brand">كشاف · تفاصيل محلية</span>
-          <button type="button" class="detail-close" data-close-detail aria-label="إغلاق">✕</button>
+          <button type="button" class="detail-close" id="detailClose" aria-label="إغلاق">✕</button>
         </div>
         <p class="detail-ref" id="detailRef"></p>
         <h2 id="detailTitle"></h2>
         <p class="detail-sub" id="detailSub"></p>
       </header>
       <div class="detail-actions">
-        <a class="btn primary" id="etimadLink" href="#" target="_blank" rel="noopener">المشاركة عبر اعتماد الرسمية</a>
+        <a class="btn primary" id="etimadLink" href="https://tenders.etimad.sa" target="_blank" rel="noopener">المشاركة عبر اعتماد الرسمية</a>
         <button type="button" class="btn ghost" id="copyRef">نسخ المرجع</button>
       </div>
       <div id="detailBody" class="detail-body"></div>
       <p class="detail-note">
-        هذه بطاقة من بيانات مستودع اعتماد بلس المجلوبة محلياً. مستندات الكراسة، الضمانات، والتقديم تتم عبر منصة اعتماد الرسمية عند رغبتك في المشاركة.
+        هذه البطاقة من بيانات المستودع المجلوبة محلياً. مستندات الكراسة والتقديم تتم عبر منصة اعتماد عند رغبتك في المشاركة.
       </p>
     </aside>
   </div>
 
-  <script src="assets/app.js" defer></script>
+  <script src="assets/app.js?v=3" defer></script>
 </body>
 </html>

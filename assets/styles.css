@@ -382,15 +382,111 @@ body {
   to { opacity: 1; letter-spacing: 0.02em; filter: none; }
 }
 
-/* —— Detail sheet —— */
-.detail[hidden] { display: none !important; }
+/* —— Catalog / explorer —— */
+.catalog {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
 
+.catalog-card {
+  text-align: right;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.catalog-card:hover {
+  border-color: rgba(201, 162, 39, 0.45);
+  background: rgba(201, 162, 39, 0.06);
+}
+
+.catalog-card strong {
+  display: block;
+  font-family: var(--font-brand);
+  font-size: 1.25rem;
+  color: var(--paper);
+  margin-bottom: 0.25rem;
+}
+
+.catalog-card span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.missing-list {
+  margin: 0;
+  padding: 0 1.2rem;
+  color: var(--mist);
+  line-height: 1.9;
+}
+
+.group-tabs,
+.dataset-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.85rem;
+}
+
+.chip {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 0.45rem 0.85rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chip.on {
+  color: #1a1405;
+  background: var(--brass);
+  border-color: var(--brass);
+}
+
+.chip em {
+  font-style: normal;
+  opacity: 0.8;
+  margin-inline-start: 0.25rem;
+}
+
+tr.is-clickable { cursor: pointer; }
+tr.is-clickable:hover { background: rgba(201, 162, 39, 0.08); }
+
+.meta-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 1rem;
+  color: var(--mist);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.meta-view { padding: 0.5rem; }
+
+body.detail-open { overflow: hidden; }
+
+/* —— Detail sheet —— */
 .detail {
   position: fixed;
   inset: 0;
-  z-index: 40;
-  display: grid;
+  z-index: 1000;
+  display: none;
   grid-template-columns: 1fr min(640px, 100%);
+}
+
+.detail.is-open {
+  display: grid;
 }
 
 .detail-backdrop {

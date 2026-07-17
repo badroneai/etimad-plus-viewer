@@ -1,578 +1,614 @@
-const PAGE = 30;
-const DATA = "./data";
+(() => {
+  const DATA = "./data";
+  const PAGE = 40;
 
-const cache = {};
-const byRef = new Map();
+  const GROUPS = [
+    { id: "tenders", title: "المنافسات" },
+    { id: "taxonomy", title: "التصنيفات" },
+    { id: "entities", title: "الجهات والشركات" },
+    { id: "sitemap", title: "خريطة الموقع" },
+    { id: "meta", title: "ميتا الجلب" },
+  ];
 
-const ui = {
-  open: { page: 1, q: "", activity: "", type: "", sort: "deadline" },
-  horizon: { page: 1, q: "", activity: "", tab: "within_7" },
-  awarded: { page: 1, q: "", activity: "", type: "", loaded: false },
-  agencies: { page: 1, q: "" },
-};
+  const TENDER_SETS = new Set(["open", "within_7", "within_30", "awarded", "ssr_tenders"]);
 
-function fmt(n) {
-  if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
-  return Number(n).toLocaleString("ar-SA");
-}
+  const state = {
+    manifest: null,
+    group: "tenders",
+    datasetId: "open",
+    q: "",
+    activity: "",
+    type: "",
+    page: 1,
+    cache: {},
+    byRef: new Map(),
+    currentRows: [],
+  };
 
-function money(n) {
-  if (n == null || n === "" || n === "****") return n === "****" ? "****" : "—";
-  const num = Number(n);
-  if (Number.isNaN(num)) return String(n);
-  return `${num.toLocaleString("ar-SA", { maximumFractionDigits: 0 })} ر.س`;
-}
+  const el = {
+    statStrip: document.getElementById("statStrip"),
+    metaLine: document.getElementById("metaLine"),
+    catalog: document.getElementById("catalog"),
+    missingList: document.getElementById("missingList"),
+    groupTabs: document.getElementById("groupTabs"),
+    datasetTabs: document.getElementById("datasetTabs"),
+    search: document.getElementById("search"),
+    filterActivity: document.getElementById("filterActivity"),
+    filterType: document.getElementById("filterType"),
+    setMeta: document.getElementById("setMeta"),
+    gridHead: document.getElementById("gridHead"),
+    gridBody: document.getElementById("gridBody"),
+    pager: document.getElementById("pager"),
+    detailRoot: document.getElementById("detailRoot"),
+    detailRef: document.getElementById("detailRef"),
+    detailTitle: document.getElementById("detailTitle"),
+    detailSub: document.getElementById("detailSub"),
+    detailBody: document.getElementById("detailBody"),
+    etimadLink: document.getElementById("etimadLink"),
+    copyRef: document.getElementById("copyRef"),
+    detailClose: document.getElementById("detailClose"),
+    detailBackdrop: document.getElementById("detailBackdrop"),
+  };
 
-function esc(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
+  function fmt(n) {
+    if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
+    return Number(n).toLocaleString("ar-SA");
+  }
 
-function dt(v) {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return String(v);
-  return d.toLocaleString("ar-SA", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+  function money(n) {
+    if (n == null || n === "" || n === "****") return n === "****" ? "****" : "—";
+    const num = Number(n);
+    if (Number.isNaN(num)) return String(n);
+    return `${num.toLocaleString("ar-SA", { maximumFractionDigits: 0 })} ر.س`;
+  }
 
-function indexRows(rows, source) {
-  for (const row of rows) {
-    if (!row?.ref) continue;
-    const prev = byRef.get(row.ref);
-    // prefer awarded (richer) over open if both exist
-    if (!prev || source === "awarded" || (source !== "open" && prev._source === "open")) {
-      byRef.set(row.ref, { ...row, _source: source });
+  function esc(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
+  function dt(v) {
+    if (!v) return "—";
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return String(v);
+    return d.toLocaleString("ar-SA", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  async function loadJSON(file) {
+    if (state.cache[file]) return state.cache[file];
+    el.setMeta.textContent = `جاري تحميل ${file}…`;
+    const res = await fetch(`${DATA}/${file}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
+    const json = await res.json();
+    state.cache[file] = json;
+    return json;
+  }
+
+  function indexTenders(rows, source) {
+    for (const row of rows) {
+      if (!row?.ref) continue;
+      const prev = state.byRef.get(String(row.ref));
+      if (!prev || source === "awarded") {
+        state.byRef.set(String(row.ref), { ...row, _source: source });
+      }
     }
   }
-}
 
-async function loadSet(file, source) {
-  if (cache[file]) return cache[file];
-  const res = await fetch(`${DATA}/${file}`, { cache: "no-store" });
-  if (!res.ok) throw new Error(`${file}: ${res.status}`);
-  const json = await res.json();
-  const rows = Array.isArray(json) ? json : json.records || [];
-  cache[file] = rows;
-  if (source) indexRows(rows, source);
-  return rows;
-}
-
-async function ensureAwarded() {
-  if (ui.awarded.loaded) return cache["awarded.json"];
-  const tbody = document.querySelector('[data-table="awarded"] tbody');
-  if (tbody) tbody.innerHTML = `<tr><td colspan="6">جاري تحميل المرساة (ملف كبير)…</td></tr>`;
-  await loadSet("awarded.json", "awarded");
-  ui.awarded.loaded = true;
-  return cache["awarded.json"];
-}
-
-function uniqueSorted(rows, key) {
-  return [...new Set(rows.map((r) => r[key]).filter(Boolean))].sort((a, b) =>
-    String(a).localeCompare(String(b), "ar")
-  );
-}
-
-function fillSelect(select, values, placeholder) {
-  if (!select) return;
-  const cur = select.value;
-  select.innerHTML =
-    `<option value="">${placeholder}</option>` +
-    values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
-  if ([...select.options].some((o) => o.value === cur)) select.value = cur;
-}
-
-function matchQ(row, q, keys) {
-  if (!q) return true;
-  const needle = q.trim().toLowerCase();
-  return keys.some((k) => String(row[k] ?? "").toLowerCase().includes(needle));
-}
-
-function sortOpen(rows, mode) {
-  const copy = rows.slice();
-  if (mode === "name") {
-    copy.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
-  } else if (mode === "days") {
-    copy.sort((a, b) => (Number(a.days) || 9999) - (Number(b.days) || 9999));
-  } else {
-    copy.sort((a, b) => String(a.deadline || "9999").localeCompare(String(b.deadline || "9999")));
+  function datasetsInGroup(group) {
+    return (state.manifest?.datasets || []).filter((d) => d.group === group);
   }
-  return copy;
-}
 
-function pagerHtml(page, pages, total) {
-  return `
-    <button type="button" data-act="prev" ${page <= 1 ? "disabled" : ""}>السابق</button>
-    <span>صفحة ${fmt(page)} / ${fmt(pages)} · ${fmt(total)}</span>
-    <button type="button" data-act="next" ${page >= pages ? "disabled" : ""}>التالي</button>
-  `;
-}
+  function currentDataset() {
+    return (state.manifest?.datasets || []).find((d) => d.id === state.datasetId);
+  }
 
-function slicePage(rows, page) {
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
-  const p = Math.min(Math.max(1, page), pages);
-  const start = (p - 1) * PAGE;
-  return { page: p, pages, total: rows.length, rows: rows.slice(start, start + PAGE) };
-}
+  function fillSelect(select, values, placeholder) {
+    const cur = select.value;
+    select.innerHTML =
+      `<option value="">${placeholder}</option>` +
+      values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+    if ([...select.options].some((o) => o.value === cur)) select.value = cur;
+  }
 
-function winnerLabel(row) {
-  const w = row.winners?.[0];
-  return w?.company || "—";
-}
+  function renderInventory() {
+    const m = state.manifest;
+    const obtained = m.obtained || {};
+    const items = [
+      ["مفتوحة", obtained.open_tenders_complete],
+      ["خلال 7", obtained.within_7],
+      ["خلال 30", obtained.within_30],
+      ["مرساة جزئية", obtained.awarded_yes_partial],
+      ["أنشطة facets", obtained.activities_from_facets],
+      ["جهات facets", obtained.agencies_from_facets],
+      ["أنواع", obtained.types_from_facets],
+      ["شركات خريطة", obtained.sitemap_companies],
+      ["جهات خريطة", obtained.sitemap_agencies],
+      ["مراجع منافسات خريطة", obtained.sitemap_tenders],
+      ["شركات API", obtained.api_companies],
+      ["جهات API", obtained.api_agencies],
+      ["facet grand", obtained.facets_grand],
+    ];
+    el.statStrip.innerHTML = items
+      .map(([label, val]) => `<div class="stat"><b>${fmt(val)}</b><span>${esc(label)}</span></div>`)
+      .join("");
+    el.metaLine.textContent = `لقطة المرآة: ${m.generated_at || "—"} · ${m.note || ""}`;
 
-function nameCell(row) {
-  return `<td>
-    <button type="button" class="tender-link" data-ref="${esc(row.ref)}">${esc(row.name)}</button>
-    <span class="meta">${esc(row.ref)}${row.num ? ` · رقم ${esc(row.num)}` : ""}</span>
-  </td>`;
-}
+    el.catalog.innerHTML = (m.datasets || [])
+      .map(
+        (d) => `<button type="button" class="catalog-card" data-open-set="${esc(d.id)}">
+          <strong>${esc(d.title)}</strong>
+          <span>${d.count != null ? fmt(d.count) : "ملف ميتا"} · ${esc(d.file)}</span>
+        </button>`
+      )
+      .join("");
 
-function agencyCell(row) {
-  return `<td>${esc(row.agency || "—")}${
-    row.branch ? `<span class="meta">${esc(row.branch)}</span>` : ""
-  }</td>`;
-}
+    const missing = m.still_missing || {};
+    const labels = {
+      awarded_yes_remainder_after_11300: "بقية المرساة بعد 11,300",
+      all_unfiltered_dump: "تفريغ all غير المفلتر",
+      "82_winnerfacet_json": "ملف winnerfacet",
+      winnerfacet_usable_payload: "حمولة winnerfacet صالحة",
+      priority_save_non_gated_bodies: "حفظ أولوية غير مقيّد",
+    };
+    const entries = Object.entries(missing).filter(([, v]) => v);
+    el.missingList.innerHTML = entries.length
+      ? entries.map(([k]) => `<li>${esc(labels[k] || k)}</li>`).join("")
+      : `<li>لا يوجد نقص معلن في حالة الجلب الحالية.</li>`;
+  }
 
-function renderOpen() {
-  const tbody = document.querySelector('[data-table="open"] tbody');
-  const pager = document.querySelector('[data-pager="open"]');
-  const s = ui.open;
-  let rows = cache["open.json"] || [];
-  rows = rows.filter(
-    (r) =>
-      matchQ(r, s.q, ["name", "agency", "ref", "activity", "type", "branch", "region", "num"]) &&
-      (!s.activity || r.activity === s.activity) &&
-      (!s.type || r.type === s.type)
-  );
-  rows = sortOpen(rows, s.sort);
-  const page = slicePage(rows, s.page);
-  s.page = page.page;
-  tbody.innerHTML = page.rows.length
-    ? page.rows
-        .map(
-          (r) => `<tr>
-        ${nameCell(r)}
-        ${agencyCell(r)}
-        <td>${esc(r.region || "—")}</td>
-        <td>${esc(r.activity || "—")}</td>
-        <td><span class="pill">${esc(r.type || "—")}</span></td>
-        <td>${esc(r.deadline || "—")}</td>
-        <td>${
-          r.days != null && Number(r.days) <= 3
-            ? `<span class="pill warn">${fmt(r.days)} يوم · ${fmt(r.hoursLeft)} س</span>`
-            : `${fmt(r.days)} يوم`
-        }</td>
-      </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="7">لا توجد نتائج.</td></tr>`;
-  pager.innerHTML = pagerHtml(page.page, page.pages, page.total);
-}
+  function renderGroupTabs() {
+    el.groupTabs.innerHTML = GROUPS.map(
+      (g) =>
+        `<button type="button" class="tab ${state.group === g.id ? "on" : ""}" data-group="${g.id}">${esc(
+          g.title
+        )}</button>`
+    ).join("");
+  }
 
-function renderHorizon() {
-  const file = `${ui.horizon.tab}.json`;
-  const tbody = document.querySelector('[data-table="horizon"] tbody');
-  const pager = document.querySelector('[data-pager="horizon"]');
-  const s = ui.horizon;
-  let rows = cache[file] || [];
-  rows = rows.filter(
-    (r) =>
-      matchQ(r, s.q, ["name", "agency", "ref", "activity", "branch", "region"]) &&
-      (!s.activity || r.activity === s.activity)
-  );
-  rows = sortOpen(rows, "deadline");
-  const page = slicePage(rows, s.page);
-  s.page = page.page;
-  tbody.innerHTML = page.rows.length
-    ? page.rows
-        .map(
-          (r) => `<tr>
-        ${nameCell(r)}
-        ${agencyCell(r)}
-        <td>${esc(r.region || "—")}</td>
-        <td>${esc(r.activity || "—")}</td>
-        <td>${esc(r.deadline || "—")}</td>
-        <td>${fmt(r.days)} يوم · ${fmt(r.hoursLeft)} س</td>
-      </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="6">لا توجد نتائج.</td></tr>`;
-  pager.innerHTML = pagerHtml(page.page, page.pages, page.total);
-}
+  function renderDatasetTabs() {
+    const sets = datasetsInGroup(state.group);
+    el.datasetTabs.innerHTML = sets
+      .map(
+        (d) =>
+          `<button type="button" class="chip ${state.datasetId === d.id ? "on" : ""}" data-set="${d.id}">
+            ${esc(d.title)}${d.count != null ? ` <em>${fmt(d.count)}</em>` : ""}
+          </button>`
+      )
+      .join("");
+  }
 
-function renderAwarded() {
-  const tbody = document.querySelector('[data-table="awarded"] tbody');
-  const pager = document.querySelector('[data-pager="awarded"]');
-  if (!ui.awarded.loaded) {
-    tbody.innerHTML = `<tr><td colspan="6">اضغط هنا أو انتظر التحميل…</td></tr>`;
-    ensureAwarded().then(() => {
-      const open = cache["open.json"] || [];
-      const awarded = cache["awarded.json"] || [];
+  function rowSearchBlob(row) {
+    return Object.values(row)
+      .flatMap((v) => {
+        if (v == null) return [];
+        if (typeof v === "object") return [JSON.stringify(v)];
+        return [String(v)];
+      })
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function filterRows(rows) {
+    let out = rows;
+    const q = state.q.trim().toLowerCase();
+    if (q) out = out.filter((r) => rowSearchBlob(r).includes(q));
+    if (state.activity) out = out.filter((r) => r.activity === state.activity);
+    if (state.type) out = out.filter((r) => r.type === state.type);
+    return out;
+  }
+
+  function columnsFor(datasetId, sample) {
+    if (TENDER_SETS.has(datasetId)) {
+      return [
+        { key: "name", label: "المنافسة" },
+        { key: "agency", label: "الجهة / الفرع" },
+        { key: "region", label: "المنطقة" },
+        { key: "activity", label: "النشاط" },
+        { key: "type", label: "النوع" },
+        { key: "deadline", label: "الإغلاق" },
+        { key: "extra", label: "إضافي" },
+      ];
+    }
+    if (datasetId === "tender_refs_sitemap") {
+      return [
+        { key: "ref", label: "المرجع" },
+        { key: "sitemap_url", label: "رابط الخريطة" },
+      ];
+    }
+    if (datasetId.startsWith("companies")) {
+      return [
+        { key: "name", label: "الشركة" },
+        { key: "wins", label: "ترسيات" },
+        { key: "bids", label: "مشاركات" },
+        { key: "value", label: "قيمة / أخرى" },
+        { key: "sitemap_url", label: "رابط" },
+      ];
+    }
+    if (datasetId.startsWith("agencies") || datasetId === "activities" || datasetId === "types") {
+      return [
+        { key: "name", label: "الاسم" },
+        { key: "count", label: "العدد" },
+        { key: "sitemap_url", label: "رابط" },
+      ];
+    }
+    if (datasetId === "activities_sitemap") {
+      return [
+        { key: "act", label: "رمز النشاط" },
+        { key: "sitemap_url", label: "رابط الخريطة" },
+      ];
+    }
+    // generic from sample keys
+    const keys = sample ? Object.keys(sample).slice(0, 6) : ["value"];
+    return keys.map((k) => ({ key: k, label: k }));
+  }
+
+  function tenderExtra(row) {
+    if (row.winAmount != null) return money(row.winAmount);
+    if (row.days != null) return `${fmt(row.days)} يوم`;
+    if (row.award) return esc(row.award);
+    return "—";
+  }
+
+  function cellHTML(datasetId, col, row) {
+    if (TENDER_SETS.has(datasetId) && col.key === "name") {
+      return `<button type="button" class="tender-link" data-ref="${esc(row.ref)}">${esc(
+        row.name || row.ref || "—"
+      )}</button><span class="meta">${esc(row.ref || "")}${
+        row.num ? ` · ${esc(row.num)}` : ""
+      }</span>`;
+    }
+    if (col.key === "agency") {
+      return `${esc(row.agency || "—")}${row.branch ? `<span class="meta">${esc(row.branch)}</span>` : ""}`;
+    }
+    if (col.key === "extra") return tenderExtra(row);
+    if (col.key === "sitemap_url" || col.key === "url") {
+      const u = row[col.key];
+      return u
+        ? `<a href="${esc(u)}" target="_blank" rel="noopener">فتح</a>`
+        : "—";
+    }
+    if (col.key === "count" || col.key === "wins" || col.key === "bids") return fmt(row[col.key]);
+    if (col.key === "value" || col.key === "total") {
+      const v = row.value ?? row.total;
+      return v == null ? "—" : esc(v);
+    }
+    const v = row[col.key];
+    if (v == null || v === "") return "—";
+    if (typeof v === "object") return `<code>${esc(JSON.stringify(v).slice(0, 80))}</code>`;
+    return esc(v);
+  }
+
+  function renderMetaFile(json, datasetId) {
+    el.filterActivity.hidden = true;
+    el.filterType.hidden = true;
+    if (datasetId === "taxonomy_observed") {
+      const blocks = ["activities", "types", "agencies", "branches", "winner_companies"]
+        .map((k) => {
+          const arr = json[k] || [];
+          return `<div class="detail-block"><h3>${esc(k)} (${fmt(arr.length)})</h3>
+            <ul class="bid-list">${arr
+              .slice(0, 100)
+              .map((x) => {
+                if (typeof x === "string") return `<li><div>${esc(x)}</div></li>`;
+                return `<li><div>${esc(x.value || x.name || JSON.stringify(x))}</div><div>${fmt(
+                  x.n || x.count
+                )}</div></li>`;
+              })
+              .join("")}</ul></div>`;
+        })
+        .join("");
+      el.gridHead.innerHTML = "";
+      el.gridBody.innerHTML = `<tr><td colspan="1"><div class="meta-view">${blocks}</div></td></tr>`;
+      el.pager.innerHTML = "";
+      el.setMeta.textContent = "تصنيف مرصود من عيّنات SSR";
+      return;
+    }
+
+    if (datasetId === "fetch_status" || datasetId === "inventory") {
+      el.gridHead.innerHTML = "";
+      el.gridBody.innerHTML = `<tr><td><pre class="meta-pre">${esc(
+        JSON.stringify(json, null, 2)
+      )}</pre></td></tr>`;
+      el.pager.innerHTML = "";
+      el.setMeta.textContent = "ملف حالة / تدقيق كما هو من المستودع";
+      return;
+    }
+  }
+
+  function renderTable() {
+    const ds = currentDataset();
+    if (!ds) return;
+    const raw = state.cache[ds.file];
+    if (!raw) return;
+
+    if (ds.group === "meta" && !Array.isArray(raw.records)) {
+      renderMetaFile(raw, ds.id);
+      return;
+    }
+
+    let rows = Array.isArray(raw) ? raw : raw.records || [];
+    if (TENDER_SETS.has(ds.id)) {
+      el.filterActivity.hidden = false;
+      el.filterType.hidden = false;
       fillSelect(
-        document.querySelector('[data-set="awarded"] .activity'),
-        uniqueSorted(awarded, "activity"),
+        el.filterActivity,
+        [...new Set(rows.map((r) => r.activity).filter(Boolean))].sort((a, b) =>
+          String(a).localeCompare(String(b), "ar")
+        ),
         "كل الأنشطة"
       );
       fillSelect(
-        document.querySelector('[data-set="awarded"] .type'),
-        uniqueSorted(awarded, "type"),
+        el.filterType,
+        [...new Set(rows.map((r) => r.type).filter(Boolean))].sort((a, b) =>
+          String(a).localeCompare(String(b), "ar")
+        ),
         "كل الأنواع"
       );
-      renderAwarded();
-      void open;
-    });
-    return;
-  }
-  const s = ui.awarded;
-  let rows = cache["awarded.json"] || [];
-  rows = rows.filter(
-    (r) =>
-      matchQ(r, s.q, ["name", "agency", "ref", "activity", "type", "branch"]) &&
-      (!s.activity || r.activity === s.activity) &&
-      (!s.type || r.type === s.type)
-  );
-  const page = slicePage(rows, s.page);
-  s.page = page.page;
-  tbody.innerHTML = page.rows.length
-    ? page.rows
-        .map(
-          (r) => `<tr>
-        ${nameCell(r)}
-        ${agencyCell(r)}
-        <td>${esc(r.activity || "—")}</td>
-        <td>${fmt(r.bids)}</td>
-        <td>${esc(winnerLabel(r))}</td>
-        <td>${money(r.winAmount)}</td>
-      </tr>`
-        )
-        .join("")
-    : `<tr><td colspan="6">لا توجد نتائج.</td></tr>`;
-  pager.innerHTML = pagerHtml(page.page, page.pages, page.total);
-}
+    } else {
+      el.filterActivity.hidden = true;
+      el.filterType.hidden = true;
+    }
 
-function renderSimple(file, table) {
-  const tbody = document.querySelector(`[data-table="${table}"] tbody`);
-  const rows = cache[file] || [];
-  if (table === "companies") {
-    tbody.innerHTML = rows
-      .map(
-        (r) =>
-          `<tr><td>${esc(r.name)}</td><td>${esc(r.wins)}</td><td>${esc(r.bids)}</td></tr>`
-      )
-      .join("");
-    return;
-  }
-  tbody.innerHTML = rows
-    .map((r) => `<tr><td>${esc(r.name)}</td><td>${fmt(r.count)}</td></tr>`)
-    .join("");
-}
+    rows = filterRows(rows);
+    state.currentRows = rows;
+    const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+    state.page = Math.min(Math.max(1, state.page), pages);
+    const slice = rows.slice((state.page - 1) * PAGE, state.page * PAGE);
+    const cols = columnsFor(ds.id, slice[0]);
 
-function renderAgencies() {
-  const tbody = document.querySelector('[data-table="agencies"] tbody');
-  const pager = document.querySelector('[data-pager="agencies"]');
-  const s = ui.agencies;
-  let rows = (cache["agencies.json"] || []).filter((r) => matchQ(r, s.q, ["name"]));
-  const page = slicePage(rows, s.page);
-  s.page = page.page;
-  tbody.innerHTML = page.rows
-    .map(
-      (r, i) =>
-        `<tr><td>${fmt((page.page - 1) * PAGE + i + 1)}</td><td>${esc(r.name)}</td><td>${fmt(
-          r.count
-        )}</td></tr>`
-    )
-    .join("");
-  pager.innerHTML = pagerHtml(page.page, page.pages, page.total);
-}
+    el.gridHead.innerHTML = `<tr>${cols.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr>`;
+    if (!slice.length) {
+      el.gridBody.innerHTML = `<tr><td colspan="${cols.length}">لا نتائج في هذه المجموعة.</td></tr>`;
+    } else {
+      el.gridBody.innerHTML = slice
+        .map((row) => {
+          const refAttr = row.ref ? ` data-ref="${esc(row.ref)}"` : "";
+          const clickable = TENDER_SETS.has(ds.id) && row.ref ? " is-clickable" : "";
+          return `<tr class="${clickable}"${refAttr}>${cols
+            .map((c) => `<td>${cellHTML(ds.id, c, row)}</td>`)
+            .join("")}</tr>`;
+        })
+        .join("");
+    }
 
-function kv(pairs) {
-  return `<dl class="kv">${pairs
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
-    .join("")}</dl>`;
-}
+    el.pager.innerHTML = `
+      <button type="button" data-act="prev" ${state.page <= 1 ? "disabled" : ""}>السابق</button>
+      <span>صفحة ${fmt(state.page)} / ${fmt(pages)} · ${fmt(rows.length)} سجل</span>
+      <button type="button" data-act="next" ${state.page >= pages ? "disabled" : ""}>التالي</button>`;
 
-function bidsBlock(title, items) {
-  if (!items?.length) {
-    return `<div class="detail-block"><h3>${esc(title)}</h3><p class="empty-hint">لا بيانات عروض في هذه اللقطة.</p></div>`;
-  }
-  return `<div class="detail-block"><h3>${esc(title)} (${fmt(items.length)})</h3>
-    <ul class="bid-list">${items
-      .map((b) => {
-        const award = b.award ?? b.bid;
-        const won = b.won ? `<span class="won">فائز</span>` : "";
-        return `<li>
-          <div><strong>${esc(b.company || "—")}</strong> ${won}
-            <span class="meta">مفتاح: ${esc(b.key || "—")}</span></div>
-          <div>${money(award)}${b.bid != null && b.award != null && b.bid !== b.award ? `<span class="meta">عرض: ${money(b.bid)}</span>` : ""}</div>
-        </li>`;
-      })
-      .join("")}</ul></div>`;
-}
-
-function openDetail(row) {
-  if (!row) return;
-  const root = document.getElementById("detailRoot");
-  document.getElementById("detailRef").textContent = `المرجع ${row.ref || "—"}`;
-  document.getElementById("detailTitle").textContent = row.name || "بدون اسم";
-  document.getElementById("detailSub").textContent = [
-    row.agency,
-    row.branch,
-    row.region,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const etimad = document.getElementById("etimadLink");
-  if (row.url) {
-    etimad.href = row.url;
-    etimad.removeAttribute("aria-disabled");
-    etimad.classList.remove("is-disabled");
-  } else {
-    etimad.href = "https://tenders.etimad.sa";
+    const partial = raw.meta?.partial || ds.partial ? " · جزئي" : "";
+    el.setMeta.textContent = `${ds.title} · الملف ${ds.file} · ${fmt(raw.count ?? rows.length)} سجل${partial}`;
   }
 
-  const remaining =
-    row.days != null
-      ? `${fmt(row.days)} يوم` + (row.hoursLeft != null ? ` (${fmt(row.hoursLeft)} ساعة)` : "")
-      : "—";
+  function kv(pairs) {
+    return `<dl class="kv">${pairs
+      .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
+      .join("")}</dl>`;
+  }
 
-  const body = document.getElementById("detailBody");
-  body.innerHTML = [
-    kv([
-      ["رقم المنافسة", esc(row.num || "—")],
+  function bidsBlock(title, items) {
+    if (!items?.length) {
+      return `<div class="detail-block"><h3>${esc(title)}</h3><p class="empty-hint">لا بيانات في اللقطة.</p></div>`;
+    }
+    return `<div class="detail-block"><h3>${esc(title)} (${fmt(items.length)})</h3>
+      <ul class="bid-list">${items
+        .map((b) => {
+          const company = b.company || b.name || "—";
+          const award = b.award ?? b.bid ?? b.award_text;
+          const won = b.won ? `<span class="won">فائز</span>` : "";
+          return `<li>
+            <div><strong>${esc(company)}</strong> ${won}
+              ${b.key ? `<span class="meta">${esc(b.key)}</span>` : ""}</div>
+            <div>${typeof award === "number" ? money(award) : esc(award ?? "—")}</div>
+          </li>`;
+        })
+        .join("")}</ul></div>`;
+  }
+
+  function openDetail(row) {
+    if (!row) {
+      el.setMeta.textContent = "تعذر العثور على سجل التفاصيل.";
+      return;
+    }
+    el.detailRef.textContent = `المرجع ${row.ref || "—"}`;
+    el.detailTitle.textContent = row.name || row.ref || "بدون اسم";
+    el.detailSub.textContent = [row.agency, row.branch, row.region].filter(Boolean).join(" · ");
+    el.etimadLink.href = row.url || "https://tenders.etimad.sa";
+
+    const remaining =
+      row.days != null
+        ? `${fmt(row.days)} يوم` + (row.hoursLeft != null ? ` (${fmt(row.hoursLeft)} ساعة)` : "")
+        : "—";
+
+    // show ALL scalar fields dynamically + known rich blocks
+    const skip = new Set(["winners", "allBids", "_source", "name", "url"]);
+    const pairs = [
+      ["الاسم", esc(row.name || "—")],
       ["المرجع", esc(row.ref || "—")],
-      ["الجهة", esc(row.agency || "—")],
-      ["الفرع / الإدارة", esc(row.branch || "—")],
-      ["المنطقة", esc(row.region || "—")],
-      ["النوع", esc(row.type || "—")],
-      ["النشاط", esc(row.activity || "—")],
-      ["آخر موعد للتقديم", esc(row.deadline || "—")],
-      ["المتبقي", esc(remaining)],
-      ["تاريخ النشر / الإرسال", esc(dt(row.submit))],
-      ["أول رصد في المستودع", esc(dt(row.firstSeen))],
-      ["آخر رصد في المستودع", esc(dt(row.lastSeen))],
-      ["الحالة (من المصدر)", esc(row.status || "غير مذكورة في اللقطة")],
-      ["عدد العروض", esc(row.bids != null ? fmt(row.bids) : "—")],
-      ["قيمة الترسية", esc(row.winAmount != null ? money(row.winAmount) : "—")],
-      ["مصدر البطاقة", esc(row._source || "مستودع")],
-    ]),
-    bidsBlock("الفائزون", row.winners || []),
-    bidsBlock("جميع العروض", row.allBids || []),
-  ].join("");
-
-  root.hidden = false;
-  document.body.style.overflow = "hidden";
-  history.replaceState(null, "", `#t/${encodeURIComponent(row.ref)}`);
-  document.getElementById("copyRef").onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(String(row.ref || ""));
-      document.getElementById("copyRef").textContent = "تم النسخ";
-      setTimeout(() => {
-        document.getElementById("copyRef").textContent = "نسخ المرجع";
-      }, 1200);
-    } catch {
-      /* ignore */
+    ];
+    for (const [k, v] of Object.entries(row)) {
+      if (skip.has(k)) continue;
+      if (v == null || v === "" || Array.isArray(v) || (typeof v === "object" && v)) continue;
+      let shown = String(v);
+      if (k === "winAmount") shown = money(v);
+      else if (k === "submit" || k === "firstSeen" || k === "lastSeen") shown = dt(v);
+      else if (k === "days" || k === "hoursLeft" || k === "bids") shown = fmt(v);
+      pairs.push([k, esc(shown)]);
     }
-  };
-}
+    pairs.push(["المتبقي (محسوب)", esc(remaining)]);
+    pairs.push(["مصدر البطاقة", esc(row._source || state.datasetId)]);
 
-function closeDetail() {
-  document.getElementById("detailRoot").hidden = true;
-  document.body.style.overflow = "";
-  if (location.hash.startsWith("#t/")) {
-    history.replaceState(null, "", location.pathname + location.search);
+    el.detailBody.innerHTML = [
+      kv(pairs),
+      bidsBlock("الفائزون", row.winners || []),
+      bidsBlock("جميع العروض", row.allBids || []),
+    ].join("");
+
+    el.detailRoot.classList.add("is-open");
+    el.detailRoot.setAttribute("aria-hidden", "false");
+    document.body.classList.add("detail-open");
+    history.replaceState(null, "", `#t/${encodeURIComponent(row.ref || "")}`);
   }
-}
 
-async function openByRef(ref) {
-  if (!ref) return;
-  let row = byRef.get(ref);
-  if (!row) {
-    await ensureAwarded();
-    row = byRef.get(ref);
-  }
-  if (row) openDetail(row);
-}
-
-function bindToolbar(set, state, onChange) {
-  const bar = document.querySelector(`.toolbar[data-set="${set}"]`);
-  if (!bar) return;
-  bar.querySelector(".q")?.addEventListener("input", (e) => {
-    state.q = e.target.value;
-    state.page = 1;
-    onChange();
-  });
-  bar.querySelector(".activity")?.addEventListener("change", (e) => {
-    state.activity = e.target.value;
-    state.page = 1;
-    onChange();
-  });
-  bar.querySelector(".type")?.addEventListener("change", (e) => {
-    state.type = e.target.value;
-    state.page = 1;
-    onChange();
-  });
-  bar.querySelector(".sort")?.addEventListener("change", (e) => {
-    state.sort = e.target.value;
-    state.page = 1;
-    onChange();
-  });
-}
-
-function bindPager(name, state, render) {
-  const el = document.querySelector(`[data-pager="${name}"]`);
-  el?.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-act]");
-    if (!btn || btn.disabled) return;
-    if (btn.dataset.act === "prev") state.page -= 1;
-    if (btn.dataset.act === "next") state.page += 1;
-    render();
-  });
-}
-
-function fillStats(manifest) {
-  const strip = document.getElementById("statStrip");
-  const sets = manifest.sets || {};
-  const facets = manifest.facets || {};
-  const items = [
-    ["إجمالي (facet)", facets.grand],
-    ["نشطة", facets.active],
-    ["قريبة الإغلاق", facets.soon],
-    ["مفتوحة (مجلوبة)", sets.open],
-    ["خلال 7 أيام", sets.within_7],
-    ["خلال 30 يوماً", sets.within_30],
-    ["مرساة (جزئية)", sets.awarded],
-    ["جهات", sets.agencies],
-    ["أنشطة", sets.activities],
-  ];
-  strip.innerHTML = items
-    .map(([label, val]) => `<div class="stat"><b>${fmt(val)}</b><span>${esc(label)}</span></div>`)
-    .join("");
-
-  document.getElementById("metaLine").textContent = `لقطة: ${
-    manifest.generated_at || "—"
-  } · حقول كاملة من المستودع · المرساة: ${
-    sets.awarded_partial ? "جزئية — الجلب مستمر" : "مكتملة"
-  }`;
-
-  const note = document.getElementById("awardedNote");
-  if (note) {
-    note.textContent = sets.awarded_partial
-      ? `تفريغ جزئي: ${fmt(sets.awarded)} ترسية — البطاقة المحلية تعرض الفائزين وجميع العروض عند توفرها.`
-      : `تفريغ مكتمل: ${fmt(sets.awarded)} ترسية.`;
-  }
-}
-
-function bindDetailChrome() {
-  document.getElementById("detailRoot").addEventListener("click", (e) => {
-    if (e.target.closest("[data-close-detail]")) closeDetail();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeDetail();
-  });
-  document.body.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-ref]");
-    if (!btn) return;
-    e.preventDefault();
-    openByRef(btn.dataset.ref);
-  });
-}
-
-async function boot() {
-  bindDetailChrome();
-  ["open", "horizon", "awarded", "agencies", "activities", "types", "companies"].forEach((sel) => {
-    const tbody = document.querySelector(`[data-table="${sel}"] tbody`);
-    if (tbody) tbody.innerHTML = `<tr><td colspan="7">جاري التحميل…</td></tr>`;
-  });
-
-  try {
-    const manifest = await (await fetch(`${DATA}/manifest.json`, { cache: "no-store" })).json();
-    fillStats(manifest);
-
-    const [open, w7, w30, agencies, activities, types, companies] = await Promise.all([
-      loadSet("open.json", "open"),
-      loadSet("within_7.json", "within_7"),
-      loadSet("within_30.json", "within_30"),
-      loadSet("agencies.json"),
-      loadSet("activities.json"),
-      loadSet("types.json"),
-      loadSet("companies.json"),
-    ]);
-
-    fillSelect(document.querySelector('[data-set="open"] .activity'), uniqueSorted(open, "activity"), "كل الأنشطة");
-    fillSelect(document.querySelector('[data-set="open"] .type'), uniqueSorted(open, "type"), "كل الأنواع");
-    fillSelect(
-      document.querySelector('[data-set="horizon"] .activity'),
-      uniqueSorted(w7.concat(w30), "activity"),
-      "كل الأنشطة"
-    );
-
-    bindToolbar("open", ui.open, renderOpen);
-    bindToolbar("horizon", ui.horizon, renderHorizon);
-    bindToolbar("awarded", ui.awarded, () => {
-      ensureAwarded().then(renderAwarded);
-    });
-    bindToolbar("agencies", ui.agencies, renderAgencies);
-    bindPager("open", ui.open, renderOpen);
-    bindPager("horizon", ui.horizon, renderHorizon);
-    bindPager("awarded", ui.awarded, renderAwarded);
-    bindPager("agencies", ui.agencies, renderAgencies);
-
-    document.querySelectorAll(".tabs .tab").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        document.querySelectorAll(".tabs .tab").forEach((b) => b.classList.remove("on"));
-        btn.classList.add("on");
-        ui.horizon.tab = btn.dataset.tab;
-        ui.horizon.page = 1;
-        await loadSet(`${ui.horizon.tab}.json`, ui.horizon.tab);
-        renderHorizon();
-      });
-    });
-
-    // lazy-load awarded when section enters view or hash asks for it
-    const awardedSec = document.getElementById("awarded");
-    if (awardedSec && "IntersectionObserver" in window) {
-      const io = new IntersectionObserver(
-        (entries) => {
-          if (entries.some((en) => en.isIntersecting)) {
-            ensureAwarded().then(renderAwarded);
-            io.disconnect();
-          }
-        },
-        { rootMargin: "200px" }
-      );
-      io.observe(awardedSec);
-    }
-
-    renderOpen();
-    renderHorizon();
-    renderAgencies();
-    renderSimple("activities.json", "activities");
-    renderSimple("types.json", "types");
-    renderSimple("companies.json", "companies");
-    document.querySelector('[data-table="awarded"] tbody').innerHTML =
-      `<tr><td colspan="6">سيتم تحميل المرساة عند الوصول إلى هذا القسم…</td></tr>`;
-
-    void agencies;
-    void activities;
-    void types;
-    void companies;
-
+  function closeDetail() {
+    el.detailRoot.classList.remove("is-open");
+    el.detailRoot.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("detail-open");
     if (location.hash.startsWith("#t/")) {
-      const ref = decodeURIComponent(location.hash.slice(3));
-      await openByRef(ref);
+      history.replaceState(null, "", location.pathname + location.search);
     }
-  } catch (err) {
-    document.getElementById("metaLine").textContent = `تعذر الإقلاع: ${err.message || err}`;
   }
-}
 
-boot();
+  async function openByRef(ref) {
+    if (!ref) return;
+    const key = String(ref);
+    let row = state.byRef.get(key);
+    if (!row) {
+      // search current filtered/unfiltered cache for tender sets
+      for (const id of TENDER_SETS) {
+        const ds = (state.manifest.datasets || []).find((d) => d.id === id);
+        if (!ds) continue;
+        if (!state.cache[ds.file]) {
+          try {
+            const json = await loadJSON(ds.file);
+            indexTenders(json.records || [], id);
+          } catch {
+            /* continue */
+          }
+        }
+        row = state.byRef.get(key);
+        if (row) break;
+      }
+    }
+    openDetail(row);
+  }
+
+  async function selectDataset(id) {
+    const ds = (state.manifest.datasets || []).find((d) => d.id === id);
+    if (!ds) return;
+    state.datasetId = id;
+    state.group = ds.group;
+    state.page = 1;
+    state.q = "";
+    state.activity = "";
+    state.type = "";
+    el.search.value = "";
+    renderGroupTabs();
+    renderDatasetTabs();
+    el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
+    try {
+      const json = await loadJSON(ds.file);
+      if (TENDER_SETS.has(id)) indexTenders(json.records || [], id);
+      renderTable();
+      document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      el.gridBody.innerHTML = `<tr><td>فشل التحميل: ${esc(err.message || err)}</td></tr>`;
+      el.setMeta.textContent = String(err.message || err);
+    }
+  }
+
+  function bind() {
+    el.groupTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-group]");
+      if (!btn) return;
+      state.group = btn.dataset.group;
+      const first = datasetsInGroup(state.group)[0];
+      if (first) selectDataset(first.id);
+      else {
+        renderGroupTabs();
+        renderDatasetTabs();
+      }
+    });
+
+    el.datasetTabs.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-set]");
+      if (!btn) return;
+      selectDataset(btn.dataset.set);
+    });
+
+    el.catalog.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-open-set]");
+      if (!btn) return;
+      selectDataset(btn.dataset.openSet);
+    });
+
+    el.search.addEventListener("input", () => {
+      state.q = el.search.value;
+      state.page = 1;
+      renderTable();
+    });
+    el.filterActivity.addEventListener("change", () => {
+      state.activity = el.filterActivity.value;
+      state.page = 1;
+      renderTable();
+    });
+    el.filterType.addEventListener("change", () => {
+      state.type = el.filterType.value;
+      state.page = 1;
+      renderTable();
+    });
+
+    el.pager.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-act]");
+      if (!btn || btn.disabled) return;
+      if (btn.dataset.act === "prev") state.page -= 1;
+      if (btn.dataset.act === "next") state.page += 1;
+      renderTable();
+    });
+
+    // Robust detail open: row or button
+    el.gridBody.addEventListener("click", (e) => {
+      const hit = e.target.closest("[data-ref]");
+      if (!hit) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openByRef(hit.getAttribute("data-ref"));
+    });
+
+    el.detailClose.addEventListener("click", closeDetail);
+    el.detailBackdrop.addEventListener("click", closeDetail);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeDetail();
+    });
+
+    el.copyRef.addEventListener("click", async () => {
+      const text = el.detailRef.textContent.replace(/^المرجع\s*/, "");
+      try {
+        await navigator.clipboard.writeText(text);
+        el.copyRef.textContent = "تم النسخ";
+        setTimeout(() => {
+          el.copyRef.textContent = "نسخ المرجع";
+        }, 1200);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  async function boot() {
+    bind();
+    try {
+      state.manifest = await loadJSON("manifest.json");
+      renderInventory();
+      renderGroupTabs();
+      renderDatasetTabs();
+      await selectDataset("open");
+      if (location.hash.startsWith("#t/")) {
+        await openByRef(decodeURIComponent(location.hash.slice(3)));
+      }
+    } catch (err) {
+      el.metaLine.textContent = `تعذر الإقلاع: ${err.message || err}`;
+    }
+  }
+
+  boot();
+})();

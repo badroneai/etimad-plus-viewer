@@ -1,53 +1,200 @@
 {
-  "generated_at": "2026-07-17T17:56:05.299991+00:00",
-  "source": "etimadplus.com warehouse fetch (unofficial aggregator)",
-  "note": "لقطة كاملة الحقول من طبقات المستودع — العرض محلي أولاً ورابط اعتماد اختياري",
-  "sets": {
-    "open": 1604,
-    "within_7": 782,
-    "within_30": 1580,
-    "awarded": 11300,
-    "awarded_partial": true,
-    "activities": 138,
-    "agencies": 802,
-    "types": 9,
-    "companies": 200
-  },
-  "tender_fields": [
-    "name",
-    "ref",
-    "num",
-    "agency",
-    "branch",
-    "type",
-    "activity",
-    "region",
-    "deadline",
-    "days",
-    "hoursLeft",
-    "submit",
-    "firstSeen",
-    "lastSeen",
-    "status",
-    "bids",
-    "winAmount",
-    "winners",
-    "allBids",
-    "url"
-  ],
+  "generated_at": "2026-07-17T18:04:26.806266+00:00",
+  "source": "etimadplus.com warehouse — full usable mirror",
+  "note": "كل الطبقات القابلة للعرض من المستودع مدمجة هنا. الناقص فقط ما لم يُجلب بعد (بقية المرساة / winnerfacet / all).",
   "facets": {
     "grand": 379552,
     "active": 1664,
     "soon": 293
   },
+  "obtained": {
+    "open_tenders_complete": 1604,
+    "within_7": 782,
+    "within_30": 1580,
+    "awarded_yes_partial": 11300,
+    "activities_from_facets": 138,
+    "agencies_from_facets": 802,
+    "types_from_facets": 9,
+    "facets_grand": 379552,
+    "facets_active": 1664,
+    "facets_soon": 293,
+    "api_agencies": 600,
+    "api_companies": 60,
+    "ssr_tenders": 50,
+    "ssr_companies": 200,
+    "ssr_agencies": 600,
+    "sitemap_urls_total": 35418,
+    "sitemap_tenders": 13665,
+    "sitemap_companies": 20968,
+    "sitemap_agencies": 696,
+    "sitemap_activities": 82,
+    "layers_80_facets_files": 4,
+    "layers_83_86_87_facet_extracts": true
+  },
+  "still_missing": {
+    "awarded_yes_remainder_after_11300": true,
+    "all_unfiltered_dump": true,
+    "82_winnerfacet_json": true,
+    "winnerfacet_usable_payload": true,
+    "priority_save_non_gated_bodies": true
+  },
+  "datasets": [
+    {
+      "id": "open",
+      "file": "open.json",
+      "title": "منافسات مفتوحة",
+      "group": "tenders",
+      "count": 1604
+    },
+    {
+      "id": "within_7",
+      "file": "within_7.json",
+      "title": "خلال 7 أيام",
+      "group": "tenders",
+      "count": 782
+    },
+    {
+      "id": "within_30",
+      "file": "within_30.json",
+      "title": "خلال 30 يوماً",
+      "group": "tenders",
+      "count": 1580
+    },
+    {
+      "id": "awarded",
+      "file": "awarded.json",
+      "title": "مرساة (جزئي)",
+      "group": "tenders",
+      "count": 11300,
+      "partial": true
+    },
+    {
+      "id": "ssr_tenders",
+      "file": "ssr_tenders.json",
+      "title": "عيّنة SSR للمنافسات",
+      "group": "tenders",
+      "count": 50
+    },
+    {
+      "id": "tender_refs_sitemap",
+      "file": "tender_refs_sitemap.json",
+      "title": "مراجع خريطة الموقع",
+      "group": "sitemap",
+      "count": 13665
+    },
+    {
+      "id": "activities",
+      "file": "activities.json",
+      "title": "أنشطة (facets)",
+      "group": "taxonomy",
+      "count": 138
+    },
+    {
+      "id": "types",
+      "file": "types.json",
+      "title": "أنواع المنافسات",
+      "group": "taxonomy",
+      "count": 9
+    },
+    {
+      "id": "agencies",
+      "file": "agencies.json",
+      "title": "جهات (facets)",
+      "group": "taxonomy",
+      "count": 802
+    },
+    {
+      "id": "activities_sitemap",
+      "file": "activities_sitemap.json",
+      "title": "أنشطة الخريطة",
+      "group": "sitemap",
+      "count": 82
+    },
+    {
+      "id": "agencies_api",
+      "file": "agencies_api.json",
+      "title": "جهات API",
+      "group": "entities",
+      "count": 600
+    },
+    {
+      "id": "agencies_ssr",
+      "file": "agencies_ssr.json",
+      "title": "جهات SSR",
+      "group": "entities",
+      "count": 600
+    },
+    {
+      "id": "agencies_sitemap",
+      "file": "agencies_sitemap.json",
+      "title": "جهات الخريطة",
+      "group": "sitemap",
+      "count": 696
+    },
+    {
+      "id": "companies_api",
+      "file": "companies_api.json",
+      "title": "شركات API",
+      "group": "entities",
+      "count": 60
+    },
+    {
+      "id": "companies_ssr",
+      "file": "companies_ssr.json",
+      "title": "شركات SSR",
+      "group": "entities",
+      "count": 200
+    },
+    {
+      "id": "companies_sitemap",
+      "file": "companies_sitemap.json",
+      "title": "شركات الخريطة",
+      "group": "sitemap",
+      "count": 20968
+    },
+    {
+      "id": "taxonomy_observed",
+      "file": "taxonomy_observed.json",
+      "title": "تصنيف مرصود SSR",
+      "group": "meta",
+      "count": null
+    },
+    {
+      "id": "fetch_status",
+      "file": "fetch_status.json",
+      "title": "حالة الجلب",
+      "group": "meta",
+      "count": null
+    },
+    {
+      "id": "inventory",
+      "file": "inventory.json",
+      "title": "تدقيق المخزون",
+      "group": "meta",
+      "count": null
+    }
+  ],
   "files": {
-    "activities.json": 11533,
-    "agencies.json": 57644,
-    "awarded.json": 20031260,
-    "companies.json": 23070,
-    "open.json": 1266901,
-    "types.json": 818,
-    "within_30.json": 1246521,
-    "within_7.json": 615479
+    "open.json": 1266907,
+    "within_7.json": 615489,
+    "within_30.json": 1246532,
+    "awarded.json": 20031273,
+    "ssr_tenders.json": 34703,
+    "activities.json": 11341,
+    "agencies.json": 57452,
+    "types.json": 626,
+    "facets_open.json": 705,
+    "agencies_api.json": 43592,
+    "companies_api.json": 10915,
+    "companies_ssr.json": 21979,
+    "companies.json": 21979,
+    "agencies_ssr.json": 44340,
+    "companies_sitemap.json": 6700284,
+    "agencies_sitemap.json": 178670,
+    "tender_refs_sitemap.json": 1257284,
+    "activities_sitemap.json": 6403,
+    "taxonomy_observed.json": 5625,
+    "fetch_status.json": 1642,
+    "inventory.json": 6243
   }
 }
