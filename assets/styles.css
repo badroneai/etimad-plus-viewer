@@ -556,9 +556,19 @@ body.detail-open { overflow: hidden; }
 
 .detail-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-  margin-bottom: 1.4rem;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  align-items: center;
+}
+
+.detail-actions .btn {
+  flex: 1 1 0;
+  min-height: 38px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  text-align: center;
 }
 
 .detail-body { display: grid; gap: 1.25rem; }
@@ -823,21 +833,26 @@ body.detail-open { overflow: hidden; }
 
   .toolbar {
     flex-direction: column;
-    gap: 0.55rem;
-    position: sticky;
-    top: 0;
-    z-index: 5;
-    padding: 0.55rem 0;
-    background: linear-gradient(180deg, rgba(5, 17, 14, 0.97), rgba(5, 17, 14, 0.92) 70%, transparent);
+    gap: 0.4rem;
+    position: static;
+    padding: 0;
+    background: none;
   }
 
   .toolbar input,
   .toolbar select {
     width: 100%;
     min-width: 0;
-    min-height: 48px;
+    min-height: 38px;
+    height: 38px;
+    padding: 0.35rem 0.7rem;
     font-size: 16px; /* prevents iOS zoom */
-    border-radius: 12px;
+    border-radius: 10px;
+  }
+
+  .toolbar input.q {
+    min-height: 38px;
+    height: 38px;
   }
 
   /* Hide wide table — use cards */
@@ -1016,25 +1031,30 @@ body.detail-open { overflow: hidden; }
   }
 
   .detail-head { order: 1; }
-  .detail-body { order: 2; flex: 1; overflow: auto; }
-  .detail-note { order: 3; font-size: 0.82rem; }
   .detail-actions {
-    order: 4;
-    position: sticky;
-    bottom: 0;
-    z-index: 2;
-    margin-top: 0.75rem;
-    margin-bottom: 0;
-    padding: 0.75rem 0 max(0.5rem, env(safe-area-inset-bottom));
-    background: linear-gradient(180deg, transparent, rgba(7, 20, 16, 0.96) 22%);
-    flex-direction: column;
+    order: 2;
+    position: static;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 0.45rem;
+    margin: 0.65rem 0 0.85rem;
+    padding: 0;
+    background: none;
   }
 
   .detail-actions .btn {
-    width: 100%;
-    min-height: 48px;
-    border-radius: 14px;
+    flex: 1 1 0;
+    width: auto;
+    min-height: 36px;
+    height: 36px;
+    padding: 0.35rem 0.55rem;
+    border-radius: 10px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
+
+  .detail-body { order: 3; flex: 1; overflow: auto; }
 
   .detail-close {
     width: 2.75rem;
