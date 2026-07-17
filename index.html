@@ -26,7 +26,7 @@
     <div class="hero-stage">
       <p class="brand">كشاف</p>
       <h1>مرصد حي لمنافسات اعتماد بلس</h1>
-      <p class="lede">واجهة لعرض ما جُلب من المستودع: المفتوحة، قرب الإغلاق، والمرساة — مع الجهات والأنشطة.</p>
+      <p class="lede">التفاصيل تُعرض هنا من بيانات المستودع أولاً. رابط اعتماد الرسمي يظهر كخيار للمشاركة عند الحاجة.</p>
       <div class="cta-row">
         <a class="btn primary" href="#open">تصفّح المفتوحة</a>
         <a class="btn ghost" href="#stats">ملخص الجلب</a>
@@ -47,7 +47,7 @@
     <section class="section" id="open">
       <div class="section-head">
         <h2>المنافسات المفتوحة</h2>
-        <p>صف كامل من آخر تفريغ ناجح لفلتر المفتوحة.</p>
+        <p>اضغط اسم المنافسة لفتح بطاقة التفاصيل المحلية — لا يتم التحويل لاعتماد تلقائياً.</p>
       </div>
       <div class="toolbar" data-set="open">
         <input type="search" class="q" placeholder="بحث بالاسم، الجهة، المرجع…" />
@@ -64,7 +64,8 @@
           <thead>
             <tr>
               <th>المنافسة</th>
-              <th>الجهة</th>
+              <th>الجهة / الفرع</th>
+              <th>المنطقة</th>
               <th>النشاط</th>
               <th>النوع</th>
               <th>الإغلاق</th>
@@ -95,7 +96,8 @@
           <thead>
             <tr>
               <th>المنافسة</th>
-              <th>الجهة</th>
+              <th>الجهة / الفرع</th>
+              <th>المنطقة</th>
               <th>النشاط</th>
               <th>الإغلاق</th>
               <th>المتبقي</th>
@@ -110,7 +112,7 @@
     <section class="section" id="awarded">
       <div class="section-head">
         <h2>المرساة / الترسيات</h2>
-        <p id="awardedNote">عيّنة مجلوبة من التفريغ الجزئي.</p>
+        <p id="awardedNote">عيّنة مجلوبة من التفريغ الجزئي — التفاصيل المحلية تتضمن العروض والفائزين عند توفرها.</p>
       </div>
       <div class="toolbar" data-set="awarded">
         <input type="search" class="q" placeholder="بحث…" />
@@ -122,10 +124,11 @@
           <thead>
             <tr>
               <th>المنافسة</th>
-              <th>الجهة</th>
+              <th>الجهة / الفرع</th>
               <th>النشاط</th>
+              <th>العروض</th>
               <th>الفائز</th>
-              <th>القيمة</th>
+              <th>قيمة الترسية</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -187,9 +190,32 @@
   </main>
 
   <footer class="footer">
-    <p><strong>كشاف</strong> — عرض استكشافي غير رسمي لبيانات مجمّعة من اعتماد بلس. المصدر الرسمي: tenders.etimad.sa</p>
+    <p><strong>كشاف</strong> — عرض استكشافي غير رسمي لبيانات مجمّعة من اعتماد بلس. المصدر الرسمي للمشاركة: tenders.etimad.sa</p>
   </footer>
 
-  <script src="assets/app.js" type="module"></script>
+  <div id="detailRoot" class="detail" hidden>
+    <button type="button" class="detail-backdrop" data-close-detail aria-label="إغلاق"></button>
+    <aside class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+      <header class="detail-head">
+        <div class="detail-head-top">
+          <span class="detail-brand">كشاف · تفاصيل محلية</span>
+          <button type="button" class="detail-close" data-close-detail aria-label="إغلاق">✕</button>
+        </div>
+        <p class="detail-ref" id="detailRef"></p>
+        <h2 id="detailTitle"></h2>
+        <p class="detail-sub" id="detailSub"></p>
+      </header>
+      <div class="detail-actions">
+        <a class="btn primary" id="etimadLink" href="#" target="_blank" rel="noopener">المشاركة عبر اعتماد الرسمية</a>
+        <button type="button" class="btn ghost" id="copyRef">نسخ المرجع</button>
+      </div>
+      <div id="detailBody" class="detail-body"></div>
+      <p class="detail-note">
+        هذه بطاقة من بيانات مستودع اعتماد بلس المجلوبة محلياً. مستندات الكراسة، الضمانات، والتقديم تتم عبر منصة اعتماد الرسمية عند رغبتك في المشاركة.
+      </p>
+    </aside>
+  </div>
+
+  <script src="assets/app.js" defer></script>
 </body>
 </html>

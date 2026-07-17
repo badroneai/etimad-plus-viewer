@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-17T17:47:37.890281+00:00",
+  "generated_at": "2026-07-17T17:56:05.299991+00:00",
   "source": "etimadplus.com warehouse fetch (unofficial aggregator)",
-  "note": "بيانات مستخرجة لأغراض استكشافية شخصية — ليست بديلاً عن منصة اعتماد الرسمية",
+  "note": "لقطة كاملة الحقول من طبقات المستودع — العرض محلي أولاً ورابط اعتماد اختياري",
   "sets": {
     "open": 1604,
     "within_7": 782,
@@ -13,19 +13,41 @@
     "types": 9,
     "companies": 200
   },
-  "files": {
-    "activities.json": 11533,
-    "agencies.json": 57644,
-    "awarded.json": 8369642,
-    "companies.json": 23070,
-    "open.json": 1097716,
-    "types.json": 818,
-    "within_30.json": 1079811,
-    "within_7.json": 533058
-  },
+  "tender_fields": [
+    "name",
+    "ref",
+    "num",
+    "agency",
+    "branch",
+    "type",
+    "activity",
+    "region",
+    "deadline",
+    "days",
+    "hoursLeft",
+    "submit",
+    "firstSeen",
+    "lastSeen",
+    "status",
+    "bids",
+    "winAmount",
+    "winners",
+    "allBids",
+    "url"
+  ],
   "facets": {
     "grand": 379552,
     "active": 1664,
     "soon": 293
+  },
+  "files": {
+    "activities.json": 11533,
+    "agencies.json": 57644,
+    "awarded.json": 20031260,
+    "companies.json": 23070,
+    "open.json": 1266901,
+    "types.json": 818,
+    "within_30.json": 1246521,
+    "within_7.json": 615479
   }
 }
