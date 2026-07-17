@@ -843,16 +843,19 @@ body.detail-open { overflow: hidden; }
   .toolbar select {
     width: 100%;
     min-width: 0;
+    flex: none !important;
     min-height: 38px;
-    height: 38px;
+    height: 38px !important;
+    max-height: 38px;
     padding: 0.35rem 0.7rem;
     font-size: 16px; /* prevents iOS zoom */
     border-radius: 10px;
   }
 
   .toolbar input.q {
-    min-height: 38px;
-    height: 38px;
+    flex: none !important;
+    height: 38px !important;
+    max-height: 38px;
   }
 
   /* Hide wide table — use cards */
