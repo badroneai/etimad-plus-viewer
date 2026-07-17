@@ -696,6 +696,8 @@
     el.detailRoot.classList.add("is-open");
     el.detailRoot.setAttribute("aria-hidden", "false");
     document.body.classList.add("detail-open");
+    const panel = el.detailRoot.querySelector(".detail-panel");
+    if (panel) panel.scrollTop = 0;
     history.replaceState(null, "", `#t/${encodeURIComponent(row.ref || "")}`);
   }
 
