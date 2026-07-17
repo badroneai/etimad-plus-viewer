@@ -2,7 +2,7 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>كشاف — مرآة مستودع اعتماد بلس</title>
   <meta name="description" content="عرض كامل لكل ما جُلب من مستودع اعتماد بلس: المنافسات، الجهات، الشركات، الأنشطة، وخرائط الموقع." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -25,7 +25,7 @@
     <div class="hero-stage">
       <p class="brand">كشاف</p>
       <h1>مرآة كاملة لما جُلب من المستودع</h1>
-      <p class="lede">كل طبقة قابلة للعرض مدمجة هنا. اضغط أي منافسة لبطاقة تفاصيل محلية — اعتماد الرسمية زر اختياري للمشاركة.</p>
+      <p class="lede">الواجهة عربية بالكامل. المنافسات الإنجليزية المفتوحة تُعرض بنصها الأصلي ثم تعريبها. التفاصيل محلية أولاً — اعتماد زر اختياري للمشاركة.</p>
       <div class="cta-row">
         <a class="btn primary" href="#explorer">افتح المستكشف</a>
         <a class="btn ghost" href="#inventory">عرض المخزون</a>
@@ -92,7 +92,10 @@
           <button type="button" class="detail-close" id="detailClose" aria-label="إغلاق">✕</button>
         </div>
         <p class="detail-ref" id="detailRef"></p>
-        <h2 id="detailTitle"></h2>
+        <div class="detail-titles">
+          <h2 id="detailTitle"></h2>
+          <p class="detail-title-ar" id="detailTitleAr" hidden></p>
+        </div>
         <p class="detail-sub" id="detailSub"></p>
       </header>
       <div class="detail-actions">
@@ -106,6 +109,6 @@
     </aside>
   </div>
 
-  <script src="assets/app.js?v=3" defer></script>
+  <script src="assets/app.js?v=4" defer></script>
 </body>
 </html>

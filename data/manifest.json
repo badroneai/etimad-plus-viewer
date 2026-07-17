@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-07-17T18:04:26.806266+00:00",
   "source": "etimadplus.com warehouse — full usable mirror",
-  "note": "كل الطبقات القابلة للعرض من المستودع مدمجة هنا. الناقص فقط ما لم يُجلب بعد (بقية المرساة / winnerfacet / all).",
+  "note": "كل الطبقات القابلة للعرض مدمجة. الواجهة عربية. المنافسات المفتوحة ذات الأسماء الإنجليزية مُعرَّبة مع الإبقاء على الأصل.",
   "facets": {
     "grand": 379552,
     "active": 1664,
@@ -196,5 +196,6 @@
     "taxonomy_observed.json": 5625,
     "fetch_status.json": 1642,
     "inventory.json": 6243
-  }
+  },
+  "open_english_translated": 236
 }

@@ -12,6 +12,93 @@
 
   const TENDER_SETS = new Set(["open", "within_7", "within_30", "awarded", "ssr_tenders"]);
 
+  const FIELD_AR = {
+    name: "الاسم",
+    name_en: "الاسم بالإنجليزية (الأصل)",
+    name_ar: "التعريب العربي",
+    ref: "المرجع",
+    num: "رقم المنافسة",
+    agency: "الجهة",
+    branch: "الفرع / الإدارة",
+    type: "النوع",
+    activity: "النشاط",
+    deadline: "آخر موعد للتقديم",
+    days: "الأيام المتبقية",
+    hoursLeft: "الساعات المتبقية",
+    submit: "تاريخ النشر / الإرسال",
+    firstSeen: "أول رصد في المستودع",
+    lastSeen: "آخر رصد في المستودع",
+    status: "الحالة",
+    region: "المنطقة",
+    bids: "عدد العروض",
+    winAmount: "قيمة الترسية",
+    url: "رابط اعتماد",
+    sitemap_url: "رابط خريطة الموقع",
+    wins: "الترسيات",
+    count: "العدد",
+    key: "المفتاح المعياري",
+    display: "الاسم المعروض",
+    total: "الإجمالي",
+    value: "القيمة",
+    award: "الترسية",
+    act: "رمز النشاط",
+    company: "الشركة",
+    won: "حالة الفوز",
+    bid: "قيمة العرض",
+    award_text: "نص الترسية",
+    _source: "مصدر البطاقة",
+    activities: "الأنشطة",
+    types: "الأنواع",
+    agencies: "الجهات",
+    branches: "الفروع",
+    winner_companies: "شركات فائزة مرصودة",
+    n: "التكرار",
+  };
+
+  const SOURCE_AR = {
+    open: "المنافسات المفتوحة",
+    within_7: "خلال 7 أيام",
+    within_30: "خلال 30 يوماً",
+    awarded: "المرساة",
+    ssr_tenders: "عيّنة العرض الأولي",
+  };
+
+  const META_KEY_AR = {
+    phase: "المرحلة",
+    updated_at: "آخر تحديث",
+    commitment: "الالتزام",
+    obtained: "ما تم الحصول عليه",
+    still_missing: "ما زال ناقصاً",
+    analysis_phase: "مرحلة التحليل",
+    summary: "الملخص",
+    inventory: "قائمة التدقيق",
+    audited_at: "تاريخ التدقيق",
+    open_tenders_complete: "المنافسات المفتوحة (مكتملة)",
+    within_7: "خلال 7 أيام",
+    within_30: "خلال 30 يوماً",
+    awarded_yes_partial: "المرساة (جزئي)",
+    activities_from_facets: "الأنشطة من التصنيفات",
+    agencies_from_facets: "الجهات من التصنيفات",
+    types_from_facets: "الأنواع من التصنيفات",
+    facets_grand: "الإجمالي من التصنيفات",
+    facets_active: "النشطة",
+    facets_soon: "قريبة الإغلاق",
+    api_agencies: "جهات واجهة البرمجة",
+    api_companies: "شركات واجهة البرمجة",
+    ssr_tenders: "منافسات العرض الأولي",
+    ssr_companies: "شركات العرض الأولي",
+    ssr_agencies: "جهات العرض الأولي",
+    sitemap_urls_total: "إجمالي روابط الخريطة",
+    sitemap_tenders: "منافسات الخريطة",
+    sitemap_companies: "شركات الخريطة",
+    sitemap_agencies: "جهات الخريطة",
+    sitemap_activities: "أنشطة الخريطة",
+  };
+
+  function labelAr(key) {
+    return FIELD_AR[key] || META_KEY_AR[key] || key;
+  }
+
   const state = {
     manifest: null,
     group: "tenders",
@@ -42,6 +129,7 @@
     detailRoot: document.getElementById("detailRoot"),
     detailRef: document.getElementById("detailRef"),
     detailTitle: document.getElementById("detailTitle"),
+    detailTitleAr: document.getElementById("detailTitleAr"),
     detailSub: document.getElementById("detailSub"),
     detailBody: document.getElementById("detailBody"),
     etimadLink: document.getElementById("etimadLink"),
@@ -83,11 +171,11 @@
     });
   }
 
-  async function loadJSON(file) {
+  async function loadJSON(file, label) {
     if (state.cache[file]) return state.cache[file];
-    el.setMeta.textContent = `جاري تحميل ${file}…`;
+    el.setMeta.textContent = `جاري تحميل ${label || "البيانات"}…`;
     const res = await fetch(`${DATA}/${file}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`تعذر التحميل (${res.status})`);
     const json = await res.json();
     state.cache[file] = json;
     return json;
@@ -146,7 +234,7 @@
       .map(
         (d) => `<button type="button" class="catalog-card" data-open-set="${esc(d.id)}">
           <strong>${esc(d.title)}</strong>
-          <span>${d.count != null ? fmt(d.count) : "ملف ميتا"} · ${esc(d.file)}</span>
+          <span>${d.count != null ? `${fmt(d.count)} سجل` : "بيانات وصفية"}</span>
         </button>`
       )
       .join("");
@@ -215,7 +303,7 @@
         { key: "activity", label: "النشاط" },
         { key: "type", label: "النوع" },
         { key: "deadline", label: "الإغلاق" },
-        { key: "extra", label: "إضافي" },
+        { key: "extra", label: "المتبقي / القيمة" },
       ];
     }
     if (datasetId === "tender_refs_sitemap") {
@@ -246,9 +334,25 @@
         { key: "sitemap_url", label: "رابط الخريطة" },
       ];
     }
-    // generic from sample keys
     const keys = sample ? Object.keys(sample).slice(0, 6) : ["value"];
-    return keys.map((k) => ({ key: k, label: k }));
+    return keys.map((k) => ({ key: k, label: labelAr(k) }));
+  }
+
+  function bilingualNameHTML(row) {
+    const en = row.name_en || (row.name_ar ? row.name : null);
+    const ar = row.name_ar;
+    if (ar && en) {
+      return `<button type="button" class="tender-link" data-ref="${esc(row.ref)}">
+          <span class="name-en" lang="en" dir="ltr">${esc(en)}</span>
+          <span class="name-ar">${esc(ar)}</span>
+        </button>
+        <span class="meta">${esc(row.ref || "")}${row.num ? ` · رقم ${esc(row.num)}` : ""}</span>`;
+    }
+    return `<button type="button" class="tender-link" data-ref="${esc(row.ref)}">${esc(
+      row.name || row.ref || "—"
+    )}</button><span class="meta">${esc(row.ref || "")}${
+      row.num ? ` · رقم ${esc(row.num)}` : ""
+    }</span>`;
   }
 
   function tenderExtra(row) {
@@ -260,11 +364,7 @@
 
   function cellHTML(datasetId, col, row) {
     if (TENDER_SETS.has(datasetId) && col.key === "name") {
-      return `<button type="button" class="tender-link" data-ref="${esc(row.ref)}">${esc(
-        row.name || row.ref || "—"
-      )}</button><span class="meta">${esc(row.ref || "")}${
-        row.num ? ` · ${esc(row.num)}` : ""
-      }</span>`;
+      return bilingualNameHTML(row);
     }
     if (col.key === "agency") {
       return `${esc(row.agency || "—")}${row.branch ? `<span class="meta">${esc(row.branch)}</span>` : ""}`;
@@ -287,6 +387,33 @@
     return esc(v);
   }
 
+  function renderArabicTree(obj, depth = 0) {
+    if (obj == null) return "—";
+    if (typeof obj !== "object") return esc(String(obj));
+    if (Array.isArray(obj)) {
+      if (!obj.length) return "—";
+      if (typeof obj[0] !== "object") {
+        return `<ul class="ar-list">${obj
+          .slice(0, 80)
+          .map((x) => `<li>${esc(String(x))}</li>`)
+          .join("")}</ul>`;
+      }
+      return obj
+        .slice(0, 40)
+        .map((item, i) => `<div class="ar-block"><h4>عنصر ${fmt(i + 1)}</h4>${renderArabicTree(item, depth + 1)}</div>`)
+        .join("");
+    }
+    return `<dl class="kv">${Object.entries(obj)
+      .map(([k, v]) => {
+        const label = labelAr(k);
+        if (v && typeof v === "object") {
+          return `<dt>${esc(label)}</dt><dd>${renderArabicTree(v, depth + 1)}</dd>`;
+        }
+        return `<dt>${esc(label)}</dt><dd>${esc(String(v))}</dd>`;
+      })
+      .join("")}</dl>`;
+  }
+
   function renderMetaFile(json, datasetId) {
     el.filterActivity.hidden = true;
     el.filterType.hidden = true;
@@ -294,7 +421,7 @@
       const blocks = ["activities", "types", "agencies", "branches", "winner_companies"]
         .map((k) => {
           const arr = json[k] || [];
-          return `<div class="detail-block"><h3>${esc(k)} (${fmt(arr.length)})</h3>
+          return `<div class="detail-block"><h3>${esc(labelAr(k))} (${fmt(arr.length)})</h3>
             <ul class="bid-list">${arr
               .slice(0, 100)
               .map((x) => {
@@ -309,17 +436,16 @@
       el.gridHead.innerHTML = "";
       el.gridBody.innerHTML = `<tr><td colspan="1"><div class="meta-view">${blocks}</div></td></tr>`;
       el.pager.innerHTML = "";
-      el.setMeta.textContent = "تصنيف مرصود من عيّنات SSR";
+      el.setMeta.textContent = "تصنيف مرصود من عيّنات العرض الأولي";
       return;
     }
 
     if (datasetId === "fetch_status" || datasetId === "inventory") {
       el.gridHead.innerHTML = "";
-      el.gridBody.innerHTML = `<tr><td><pre class="meta-pre">${esc(
-        JSON.stringify(json, null, 2)
-      )}</pre></td></tr>`;
+      el.gridBody.innerHTML = `<tr><td><div class="meta-view">${renderArabicTree(json)}</div></td></tr>`;
       el.pager.innerHTML = "";
-      el.setMeta.textContent = "ملف حالة / تدقيق كما هو من المستودع";
+      el.setMeta.textContent =
+        datasetId === "fetch_status" ? "حالة الجلب بالعربية" : "تدقيق المخزون بالعربية";
       return;
     }
   }
@@ -385,8 +511,13 @@
       <span>صفحة ${fmt(state.page)} / ${fmt(pages)} · ${fmt(rows.length)} سجل</span>
       <button type="button" data-act="next" ${state.page >= pages ? "disabled" : ""}>التالي</button>`;
 
-    const partial = raw.meta?.partial || ds.partial ? " · جزئي" : "";
-    el.setMeta.textContent = `${ds.title} · الملف ${ds.file} · ${fmt(raw.count ?? rows.length)} سجل${partial}`;
+    const partial = raw.meta?.partial || ds.partial ? " · تفريغ جزئي" : "";
+    let metaLine = `${ds.title} · ${fmt(raw.count ?? rows.length)} سجل${partial}`;
+    if (ds.id === "open") {
+      const arCount = (raw.records || []).filter((r) => r.name_ar).length;
+      metaLine += ` · ${fmt(arCount)} اسم إنجليزي مُعرَّب`;
+    }
+    el.setMeta.textContent = metaLine;
   }
 
   function kv(pairs) {
@@ -420,7 +551,19 @@
       return;
     }
     el.detailRef.textContent = `المرجع ${row.ref || "—"}`;
-    el.detailTitle.textContent = row.name || row.ref || "بدون اسم";
+
+    const enName = row.name_en || (row.name_ar ? row.name : null);
+    const arName = row.name_ar;
+    if (arName && enName) {
+      el.detailTitle.innerHTML = `<span class="name-en" lang="en" dir="ltr">${esc(enName)}</span>`;
+      el.detailTitleAr.hidden = false;
+      el.detailTitleAr.textContent = arName;
+    } else {
+      el.detailTitle.textContent = row.name || row.ref || "بدون اسم";
+      el.detailTitleAr.hidden = true;
+      el.detailTitleAr.textContent = "";
+    }
+
     el.detailSub.textContent = [row.agency, row.branch, row.region].filter(Boolean).join(" · ");
     el.etimadLink.href = row.url || "https://tenders.etimad.sa";
 
@@ -429,23 +572,65 @@
         ? `${fmt(row.days)} يوم` + (row.hoursLeft != null ? ` (${fmt(row.hoursLeft)} ساعة)` : "")
         : "—";
 
-    // show ALL scalar fields dynamically + known rich blocks
-    const skip = new Set(["winners", "allBids", "_source", "name", "url"]);
-    const pairs = [
-      ["الاسم", esc(row.name || "—")],
-      ["المرجع", esc(row.ref || "—")],
+    const skip = new Set([
+      "winners",
+      "allBids",
+      "_source",
+      "name",
+      "name_en",
+      "name_ar",
+      "url",
+    ]);
+    const pairs = [["المرجع", esc(row.ref || "—")]];
+    if (arName && enName) {
+      pairs.push(["الاسم بالإنجليزية (الأصل)", `<span lang="en" dir="ltr">${esc(enName)}</span>`]);
+      pairs.push(["التعريب العربي", esc(arName)]);
+    } else {
+      pairs.push(["الاسم", esc(row.name || "—")]);
+    }
+
+    const order = [
+      "num",
+      "agency",
+      "branch",
+      "region",
+      "type",
+      "activity",
+      "deadline",
+      "days",
+      "hoursLeft",
+      "submit",
+      "firstSeen",
+      "lastSeen",
+      "status",
+      "bids",
+      "winAmount",
     ];
-    for (const [k, v] of Object.entries(row)) {
-      if (skip.has(k)) continue;
-      if (v == null || v === "" || Array.isArray(v) || (typeof v === "object" && v)) continue;
+    const seen = new Set();
+    for (const k of order) {
+      if (!(k in row) || skip.has(k)) continue;
+      seen.add(k);
+      const v = row[k];
+      if (v == null || v === "") {
+        pairs.push([labelAr(k), "—"]);
+        continue;
+      }
       let shown = String(v);
       if (k === "winAmount") shown = money(v);
       else if (k === "submit" || k === "firstSeen" || k === "lastSeen") shown = dt(v);
       else if (k === "days" || k === "hoursLeft" || k === "bids") shown = fmt(v);
-      pairs.push([k, esc(shown)]);
+      pairs.push([labelAr(k), esc(shown)]);
+    }
+    for (const [k, v] of Object.entries(row)) {
+      if (skip.has(k) || seen.has(k)) continue;
+      if (v == null || v === "" || Array.isArray(v) || typeof v === "object") continue;
+      pairs.push([labelAr(k), esc(String(v))]);
     }
     pairs.push(["المتبقي (محسوب)", esc(remaining)]);
-    pairs.push(["مصدر البطاقة", esc(row._source || state.datasetId)]);
+    pairs.push([
+      "مصدر البطاقة",
+      esc(SOURCE_AR[row._source] || SOURCE_AR[state.datasetId] || "المستودع"),
+    ]);
 
     el.detailBody.innerHTML = [
       kv(pairs),
@@ -506,7 +691,7 @@
     renderDatasetTabs();
     el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
     try {
-      const json = await loadJSON(ds.file);
+      const json = await loadJSON(ds.file, ds.title);
       if (TENDER_SETS.has(id)) indexTenders(json.records || [], id);
       renderTable();
       document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
