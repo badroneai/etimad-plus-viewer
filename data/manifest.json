@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-07-17T17:47:37.890281+00:00",
+  "source": "etimadplus.com warehouse fetch (unofficial aggregator)",
+  "note": "بيانات مستخرجة لأغراض استكشافية شخصية — ليست بديلاً عن منصة اعتماد الرسمية",
+  "sets": {
+    "open": 1604,
+    "within_7": 782,
+    "within_30": 1580,
+    "awarded": 11300,
+    "awarded_partial": true,
+    "activities": 138,
+    "agencies": 802,
+    "types": 9,
+    "companies": 200
+  },
+  "files": {
+    "activities.json": 11533,
+    "agencies.json": 57644,
+    "awarded.json": 8369642,
+    "companies.json": 23070,
+    "open.json": 1097716,
+    "types.json": 818,
+    "within_30.json": 1079811,
+    "within_7.json": 533058
+  },
+  "facets": {
+    "grand": 379552,
+    "active": 1664,
+    "soon": 293
+  }
+}
