@@ -99,10 +99,14 @@
     return FIELD_AR[key] || META_KEY_AR[key] || key;
   }
 
+  const VIEWS = ["home", "inventory", "explorer", "missing"];
+
   const state = {
     manifest: null,
+    view: "home",
     group: "tenders",
     datasetId: "open",
+    explorerReady: false,
     q: "",
     activity: "",
     type: "",
@@ -706,7 +710,7 @@
     el.detailRoot.setAttribute("aria-hidden", "true");
     document.body.classList.remove("detail-open");
     if (location.hash.startsWith("#t/")) {
-      history.replaceState(null, "", location.pathname + location.search);
+      history.replaceState(null, "", "#explorer");
     }
   }
 
@@ -734,28 +738,73 @@
     openDetail(row);
   }
 
-  async function selectDataset(id) {
+  function showView(view, { updateHash = true } = {}) {
+    if (!VIEWS.includes(view)) view = "home";
+    state.view = view;
+    document.querySelectorAll(".view").forEach((node) => {
+      const on = node.dataset.view === view;
+      node.classList.toggle("is-active", on);
+      if (on) node.removeAttribute("hidden");
+      else node.setAttribute("hidden", "");
+    });
+    document.querySelectorAll("[data-nav]").forEach((link) => {
+      link.classList.toggle("is-active", link.getAttribute("data-nav") === view);
+    });
+    const footer = document.getElementById("siteFooter");
+    if (footer) footer.hidden = view !== "home";
+
+    if (updateHash && !location.hash.startsWith("#t/")) {
+      const next = `#${view}`;
+      if (location.hash !== next) history.replaceState(null, "", next);
+    }
+    window.scrollTo(0, 0);
+  }
+
+  async function ensureExplorer() {
+    if (state.explorerReady) return;
+    renderGroupTabs();
+    renderDatasetTabs();
+    await selectDataset(state.datasetId || "open", { navigate: false });
+    state.explorerReady = true;
+  }
+
+  async function selectDataset(id, { navigate = true } = {}) {
     const ds = (state.manifest.datasets || []).find((d) => d.id === id);
     if (!ds) return;
+    if (navigate) showView("explorer");
     state.datasetId = id;
     state.group = ds.group;
     state.page = 1;
     state.q = "";
     state.activity = "";
     state.type = "";
-    el.search.value = "";
+    if (el.search) el.search.value = "";
     renderGroupTabs();
     renderDatasetTabs();
     el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
+    if (el.cardList) el.cardList.innerHTML = `<p class="empty-hint">جاري التحميل…</p>`;
     try {
       const json = await loadJSON(ds.file, ds.title);
       if (TENDER_SETS.has(id)) indexTenders(json.records || [], id);
       renderTable();
-      document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      state.explorerReady = true;
     } catch (err) {
       el.gridBody.innerHTML = `<tr><td>فشل التحميل: ${esc(err.message || err)}</td></tr>`;
       el.setMeta.textContent = String(err.message || err);
     }
+  }
+
+  async function routeFromHash() {
+    const raw = (location.hash || "#home").replace(/^#/, "");
+    if (raw.startsWith("t/")) {
+      showView("explorer", { updateHash: false });
+      await ensureExplorer();
+      await openByRef(decodeURIComponent(raw.slice(2)));
+      return;
+    }
+    const view = VIEWS.includes(raw) ? raw : "home";
+    showView(view, { updateHash: false });
+    if (view === "explorer") await ensureExplorer();
   }
 
   function bind() {
@@ -780,7 +829,20 @@
     el.catalog.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-open-set]");
       if (!btn) return;
-      selectDataset(btn.dataset.openSet);
+      selectDataset(btn.dataset.openSet, { navigate: true });
+    });
+
+    document.body.addEventListener("click", (e) => {
+      const link = e.target.closest("a[data-nav]");
+      if (!link) return;
+      e.preventDefault();
+      const view = link.getAttribute("data-nav");
+      showView(view);
+      if (view === "explorer") ensureExplorer();
+    });
+
+    window.addEventListener("hashchange", () => {
+      routeFromHash();
     });
 
     el.search.addEventListener("input", () => {
@@ -839,17 +901,13 @@
 
   async function boot() {
     bind();
+    showView("home", { updateHash: false });
     try {
-      state.manifest = await loadJSON("manifest.json");
+      state.manifest = await loadJSON("manifest.json", "البيان");
       renderInventory();
-      renderGroupTabs();
-      renderDatasetTabs();
-      await selectDataset("open");
-      if (location.hash.startsWith("#t/")) {
-        await openByRef(decodeURIComponent(location.hash.slice(3)));
-      }
+      await routeFromHash();
     } catch (err) {
-      el.metaLine.textContent = `تعذر الإقلاع: ${err.message || err}`;
+      if (el.metaLine) el.metaLine.textContent = `تعذر الإقلاع: ${err.message || err}`;
     }
   }
 

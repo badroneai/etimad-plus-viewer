@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Markazi+Text:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="assets/styles.css?v=9" />
+  <link rel="stylesheet" href="assets/styles.css?v=10" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="format-detection" content="telephone=no" />
@@ -16,81 +16,93 @@
 <body>
   <div class="grain" aria-hidden="true"></div>
 
-  <header class="hero" id="top">
-    <nav class="nav">
-      <a class="nav-brand" href="#top">كشاف</a>
-      <div class="nav-links nav-links-desktop">
-        <a href="#inventory">المخزون</a>
-        <a href="#explorer">المستكشف</a>
-        <a href="#missing">الناقص</a>
-      </div>
+  <header class="app-bar">
+    <a class="nav-brand" href="#home" data-nav="home">كشاف</a>
+    <nav class="nav-links nav-links-desktop" aria-label="القائمة الرئيسية">
+      <a href="#home" data-nav="home">الرئيسية</a>
+      <a href="#inventory" data-nav="inventory">المخزون</a>
+      <a href="#explorer" data-nav="explorer">المستكشف</a>
+      <a href="#missing" data-nav="missing">الناقص</a>
     </nav>
+  </header>
+
+  <!-- الصفحة الرئيسية فقط -->
+  <section class="view view-home hero" id="view-home" data-view="home">
     <div class="hero-stage">
       <p class="brand">كشاف</p>
       <h1>مرآة كاملة لما جُلب من المستودع</h1>
       <p class="lede">الواجهة عربية بالكامل. المنافسات الإنجليزية المفتوحة تُعرض بنصها الأصلي ثم تعريبها. التفاصيل محلية أولاً — اعتماد زر اختياري للمشاركة.</p>
       <div class="cta-row">
-        <a class="btn primary" href="#explorer">افتح المستكشف</a>
-        <a class="btn ghost" href="#inventory">عرض المخزون</a>
+        <a class="btn primary" href="#explorer" data-nav="explorer">افتح المستكشف</a>
+        <a class="btn ghost" href="#inventory" data-nav="inventory">عرض المخزون</a>
       </div>
     </div>
-  </header>
+  </section>
 
-  <main>
-    <section class="section stats" id="inventory">
-      <div class="section-head">
-        <h2>مخزون الجلب المعكوس</h2>
-        <p>أرقام من طبقات المستودع كما حُفظت — لا اختصار للعرض.</p>
-      </div>
-      <div class="stat-strip" id="statStrip"></div>
-      <p class="fineprint" id="metaLine"></p>
-      <div class="catalog" id="catalog"></div>
-    </section>
+  <!-- صفحة المخزون -->
+  <section class="view section stats" id="view-inventory" data-view="inventory" hidden>
+    <div class="page-head">
+      <h1>مخزون الجلب</h1>
+      <p>أرقام من طبقات المستودع كما حُفظت — لا اختصار للعرض.</p>
+    </div>
+    <div class="stat-strip" id="statStrip"></div>
+    <p class="fineprint" id="metaLine"></p>
+    <div class="section-head" style="margin-top:2rem">
+      <h2>كتالوج المجموعات</h2>
+      <p>اختر مجموعة للانتقال إلى المستكشف.</p>
+    </div>
+    <div class="catalog" id="catalog"></div>
+  </section>
 
-    <section class="section muted" id="missing">
-      <div class="section-head">
-        <h2>ما لم يُجلب بعد</h2>
-        <p>يظهر هنا فقط ما فُقد فعلاً من الجلب — لا نخفي نقصاً.</p>
-      </div>
-      <ul class="missing-list" id="missingList"></ul>
-    </section>
+  <!-- صفحة الناقص -->
+  <section class="view section muted" id="view-missing" data-view="missing" hidden>
+    <div class="page-head">
+      <h1>ما لم يُجلب بعد</h1>
+      <p>يظهر هنا فقط ما فُقد فعلاً من الجلب — لا نخفي نقصاً.</p>
+    </div>
+    <ul class="missing-list" id="missingList"></ul>
+    <div class="cta-row" style="margin-top:1.5rem">
+      <a class="btn ghost" href="#inventory" data-nav="inventory">العودة للمخزون</a>
+      <a class="btn primary" href="#explorer" data-nav="explorer">المستكشف</a>
+    </div>
+  </section>
 
-    <section class="section" id="explorer">
-      <div class="section-head">
-        <h2>مستكشف المستودع</h2>
-        <p>اختر أي مجموعة مجلوبة. للمنافسات: التفاصيل محلية أولاً.</p>
-      </div>
+  <!-- صفحة المستكشف فقط -->
+  <section class="view section" id="view-explorer" data-view="explorer" hidden>
+    <div class="page-head">
+      <h1>مستكشف المستودع</h1>
+      <p>اختر أي مجموعة مجلوبة. للمنافسات: التفاصيل محلية أولاً.</p>
+    </div>
 
-      <div class="group-tabs" id="groupTabs" role="tablist"></div>
-      <div class="dataset-tabs" id="datasetTabs"></div>
+    <div class="group-tabs" id="groupTabs" role="tablist"></div>
+    <div class="dataset-tabs" id="datasetTabs"></div>
 
-      <div class="toolbar" id="toolbar">
-        <input type="search" id="search" class="q" placeholder="بحث في المجموعة الحالية…" />
-        <select id="filterActivity"><option value="">كل الأنشطة</option></select>
-        <select id="filterType"><option value="">كل الأنواع</option></select>
-      </div>
+    <div class="toolbar" id="toolbar">
+      <input type="search" id="search" class="q" placeholder="بحث في المجموعة الحالية…" />
+      <select id="filterActivity"><option value="">كل الأنشطة</option></select>
+      <select id="filterType"><option value="">كل الأنواع</option></select>
+    </div>
 
-      <p class="fineprint" id="setMeta"></p>
+    <p class="fineprint" id="setMeta"></p>
 
-      <div class="table-wrap" id="tableWrap">
-        <table class="grid" id="grid">
-          <thead id="gridHead"></thead>
-          <tbody id="gridBody"></tbody>
-        </table>
-      </div>
-      <div class="card-list" id="cardList" aria-live="polite"></div>
-      <div class="pager" id="pager"></div>
-    </section>
-  </main>
+    <div class="table-wrap" id="tableWrap">
+      <table class="grid" id="grid">
+        <thead id="gridHead"></thead>
+        <tbody id="gridBody"></tbody>
+      </table>
+    </div>
+    <div class="card-list" id="cardList" aria-live="polite"></div>
+    <div class="pager" id="pager"></div>
+  </section>
 
   <nav class="mobile-dock" aria-label="تنقل سريع">
-    <a href="#top">الرئيسية</a>
-    <a href="#inventory">المخزون</a>
-    <a href="#explorer" class="dock-main">المستكشف</a>
-    <a href="#missing">الناقص</a>
+    <a href="#home" data-nav="home">الرئيسية</a>
+    <a href="#inventory" data-nav="inventory">المخزون</a>
+    <a href="#explorer" data-nav="explorer" class="dock-main">المستكشف</a>
+    <a href="#missing" data-nav="missing">الناقص</a>
   </nav>
 
-  <footer class="footer">
+  <footer class="footer" id="siteFooter">
     <p><strong>كشاف</strong> — مرآة استكشافية غير رسمية لبيانات اعتماد بلس. المصدر الرسمي للمشاركة: tenders.etimad.sa</p>
   </footer>
 
@@ -117,6 +129,6 @@
     </aside>
   </div>
 
-  <script src="assets/app.js?v=8" defer></script>
+  <script src="assets/app.js?v=10" defer></script>
 </body>
 </html>
