@@ -22,11 +22,28 @@ jobs:
       - name: Check out the canonical snapshot
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned quality gates
+        run: python -m pip install ruff==0.15.22 mypy==2.3.0
+
+      - name: Enforce Ruff quality gate
+        run: python -m ruff check .
+
+      - name: Enforce mypy quality gate
+        run: python -m mypy
+
       - name: Verify exporter tests
         run: python3 -m unittest discover -s tests -v
 
       - name: Verify browser JavaScript syntax
         run: node --check assets/app.js
+
+      - name: Verify browser behavior
+        run: node --test tests/test_app.cjs
 
       - name: Verify local static-data contract
         run: python3 scripts/check_data_contract.py --root .

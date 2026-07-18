@@ -12,8 +12,13 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from export_warehouse import (
+    AWARDED_INDEX_PART_ALGORITHM,
+    AWARDED_INDEX_PART_COUNT,
+    AWARDED_INDEX_PART_FORMAT_VERSION,
     SCHEMA_VERSION,
     SHARD_COUNT,
+    awarded_index_part_config,
+    index_part_for_ref,
     parse_iso_datetime,
     shard_for_ref,
     to_halalas,
@@ -21,6 +26,8 @@ from export_warehouse import (
 
 
 LFS_HEADER = b"version https://git-lfs.github.com/spec/v1"
+AWARDED_INDEX_DESCRIPTOR_MAX_BYTES = 1024 * 1024
+AWARDED_INDEX_PART_MAX_BYTES = 5 * 1024 * 1024
 
 
 def assert_awarded_lifecycle_contract(
@@ -42,6 +49,122 @@ def assert_awarded_lifecycle_contract(
                 "awarded row has null amount and future deadline: "
                 f"{row.get('ref')} deadline={deadline.isoformat()} as_of={classified_at.isoformat()}"
             )
+
+
+def assert_awarded_index_asset_size(name: str, size: int) -> None:
+    """Enforce growth ceilings on the descriptor and each searchable part."""
+    if name == "awarded_index.json":
+        assert size < AWARDED_INDEX_DESCRIPTOR_MAX_BYTES, (
+            "awarded index descriptor exceeds 1 MiB"
+        )
+    elif name.startswith("awarded_index_parts/") and name.endswith(".json"):
+        assert size < AWARDED_INDEX_PART_MAX_BYTES, (
+            f"awarded index part exceeds 5 MiB: {name}"
+        )
+
+
+def validate_awarded_index_descriptor(index: dict) -> dict[str, dict]:
+    """Validate and index the small awarded searchable-index descriptor."""
+    assert isinstance(index, dict), "awarded index descriptor missing"
+    meta = index.get("meta") or {}
+    assert meta.get("schemaVersion") == SCHEMA_VERSION, (
+        "awarded index descriptor schema mismatch"
+    )
+    assert meta.get("dataset") == "awarded", "awarded index dataset mismatch"
+    assert meta.get("detailShards") == SHARD_COUNT, (
+        "awarded index detail shard count mismatch"
+    )
+    assert meta.get("indexParts") == awarded_index_part_config(), (
+        "awarded index part config mismatch"
+    )
+    assert isinstance(index.get("count"), int) and index["count"] >= 0, (
+        "awarded index total count missing"
+    )
+    parts = index.get("parts")
+    assert isinstance(parts, list), "awarded index parts missing"
+    assert len(parts) == AWARDED_INDEX_PART_COUNT, "awarded index part count mismatch"
+
+    by_file: dict[str, dict] = {}
+    expected_ids = {f"{part:02d}" for part in range(AWARDED_INDEX_PART_COUNT)}
+    seen_ids: set[str] = set()
+    for entry in parts:
+        assert isinstance(entry, dict), "invalid awarded index part descriptor"
+        part = str(entry.get("part") or "")
+        filename = str(entry.get("file") or "")
+        expected_file = f"awarded_index_parts/{part}.json"
+        assert part in expected_ids, f"invalid awarded index part id: {part}"
+        assert part not in seen_ids, f"duplicate awarded index part id: {part}"
+        assert filename == expected_file, f"awarded index part path mismatch: {part}"
+        assert isinstance(entry.get("count"), int) and entry["count"] >= 0, (
+            f"awarded index part count missing: {part}"
+        )
+        assert isinstance(entry.get("bytes"), int) and entry["bytes"] > 0, (
+            f"awarded index part byte count missing: {part}"
+        )
+        assert isinstance(entry.get("sha256"), str) and len(entry["sha256"]) == 64, (
+            f"awarded index part SHA-256 missing: {part}"
+        )
+        seen_ids.add(part)
+        by_file[filename] = entry
+    assert seen_ids == expected_ids, "awarded index descriptor does not cover every part"
+    return by_file
+
+
+def validate_awarded_index_part(
+    name: str,
+    payload: dict,
+    *,
+    as_of: str,
+) -> dict[str, str]:
+    """Validate one deterministic part and return ref -> detail-shard lookups."""
+    part = Path(name).stem
+    assert name == f"awarded_index_parts/{part}.json", (
+        f"invalid awarded index part path: {name}"
+    )
+    assert part.isdigit() and 0 <= int(part) < AWARDED_INDEX_PART_COUNT, (
+        f"invalid awarded index part id: {part}"
+    )
+    meta = payload.get("meta") or {}
+    assert meta.get("schemaVersion") == SCHEMA_VERSION, (
+        f"awarded index part schema mismatch: {part}"
+    )
+    assert meta.get("dataset") == "awarded_index_part", (
+        f"awarded index part dataset mismatch: {part}"
+    )
+    assert meta.get("part") == part, f"awarded index part marker mismatch: {part}"
+    assert meta.get("partCount") == AWARDED_INDEX_PART_COUNT, (
+        f"awarded index part count marker mismatch: {part}"
+    )
+    assert meta.get("formatVersion") == AWARDED_INDEX_PART_FORMAT_VERSION, (
+        f"awarded index part format mismatch: {part}"
+    )
+    assert meta.get("algorithm") == AWARDED_INDEX_PART_ALGORITHM, (
+        f"awarded index part algorithm mismatch: {part}"
+    )
+    records = payload.get("records")
+    assert isinstance(records, list), f"awarded index part records missing: {part}"
+    assert payload.get("count") == len(records), (
+        f"awarded index part internal count mismatch: {part}"
+    )
+    assert_awarded_lifecycle_contract(records, as_of=as_of)
+
+    refs: dict[str, str] = {}
+    previous_ref: str | None = None
+    for row in records:
+        ref = str(row["ref"])
+        assert ref not in refs, f"duplicate awarded index ref in part {part}: {ref}"
+        assert index_part_for_ref(ref) == int(part), (
+            f"awarded index row in wrong part: {ref}"
+        )
+        expected_detail_shard = f"{shard_for_ref(ref):02d}"
+        assert row.get("_detailShard") == expected_detail_shard, (
+            f"awarded index detail shard mismatch: {ref}"
+        )
+        if previous_ref is not None:
+            assert previous_ref < ref, f"awarded index part is not sorted: {part}"
+        previous_ref = ref
+        refs[ref] = expected_detail_shard
+    return refs
 
 
 def load_asset(path: Path):
@@ -111,6 +234,14 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
     assert datasets_by_id["awarded"].get("partial", False) == awarded_truth["partial"], (
         "awarded dataset partial flag disagrees with completeness truth"
     )
+    assert datasets_by_id["awarded"].get("indexParts") == awarded_index_part_config(), (
+        "awarded dataset index part config mismatch"
+    )
+    assert datasets_by_id["awarded"].get("detailShards") == {
+        "count": SHARD_COUNT,
+        "pathTemplate": "awarded_details/{shard}.json",
+        "algorithm": "sha256_first_byte_mod_64",
+    }, "awarded dataset detail shard config mismatch"
     awarded_index_meta = (parsed_assets.get("awarded_index.json") or {}).get("meta") or {}
     assert awarded_index_meta.get("partial") == awarded_truth["partial"], (
         "awarded index partial flag disagrees with completeness truth"
@@ -180,16 +311,58 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
     ), "awarded data is still configured for Git LFS"
 
     index = parsed_assets.get("awarded_index.json")
-    assert index and isinstance(index.get("records"), list), "awarded index missing"
-    assert_awarded_lifecycle_contract(
-        index["records"],
-        as_of=str(manifest.get("as_of") or ""),
-    )
+    assert isinstance(index, dict), "awarded index descriptor missing"
+    part_descriptors = validate_awarded_index_descriptor(index)
     for volatile in ("generatedAt", "sourceTimes", "exportedAt", "exported_at"):
         assert volatile not in (index.get("meta") or {}), f"volatile awarded index meta: {volatile}"
-    assert (data / "awarded_index.json").stat().st_size < 50 * 1024 * 1024, "awarded index exceeds 50 MiB"
-    index_by_ref = {str(row["ref"]): row for row in index["records"]}
-    assert len(index_by_ref) == len(index["records"]), "duplicate refs in awarded index"
+    assert_awarded_index_asset_size(
+        "awarded_index.json",
+        (data / "awarded_index.json").stat().st_size,
+    )
+    assert "records" not in (assets.get("awarded_index.json") or {}), (
+        "awarded index descriptor must not claim inline records"
+    )
+
+    index_by_ref: dict[str, dict] = {}
+    expected_part_files = set(part_descriptors)
+    actual_part_files = {
+        path.relative_to(data).as_posix()
+        for path in (data / "awarded_index_parts").glob("*.json")
+    }
+    assert actual_part_files == expected_part_files, (
+        "stale or missing awarded index part files"
+    )
+    for name, descriptor in part_descriptors.items():
+        assert name in parsed_assets, f"awarded index part absent from manifest: {name}"
+        manifest_descriptor = assets.get(name) or {}
+        assert descriptor["bytes"] == manifest_descriptor.get("bytes"), (
+            f"awarded index part byte descriptor mismatch: {name}"
+        )
+        assert descriptor["sha256"] == manifest_descriptor.get("sha256"), (
+            f"awarded index part SHA descriptor mismatch: {name}"
+        )
+        assert descriptor["count"] == manifest_descriptor.get("records"), (
+            f"awarded index part count descriptor mismatch: {name}"
+        )
+        assert manifest_descriptor.get("role") == "awarded_search_index_part", (
+            f"awarded index part role mismatch: {name}"
+        )
+        assert_awarded_index_asset_size(name, (data / name).stat().st_size)
+        payload = parsed_assets[name]
+        for volatile in ("generatedAt", "sourceTimes", "exportedAt", "exported_at"):
+            assert volatile not in (payload.get("meta") or {}), (
+                f"volatile awarded index part meta: {name}:{volatile}"
+            )
+        refs = validate_awarded_index_part(
+            name,
+            payload,
+            as_of=str(manifest.get("as_of") or ""),
+        )
+        overlap = set(index_by_ref) & set(refs)
+        assert not overlap, f"duplicate refs across awarded index parts: {sorted(overlap)[:3]}"
+        for ref, detail_shard in refs.items():
+            index_by_ref[ref] = {"_detailShard": detail_shard}
+    assert len(index_by_ref) == index["count"], "awarded index union/count mismatch"
 
     detail_by_ref = {}
     for shard in range(SHARD_COUNT):
@@ -267,6 +440,7 @@ def fetch_remote_asset(
         raw = response.read()
     if raw.startswith(LFS_HEADER):
         raise AssertionError(f"remote asset is a Git LFS pointer: {name}")
+    assert_awarded_index_asset_size(name, len(raw))
     if len(raw) != expected.get("bytes"):
         raise AssertionError(
             f"remote byte count mismatch: {name}: {len(raw)} != {expected.get('bytes')}"
@@ -295,21 +469,15 @@ def fetch_remote_asset(
         "signature": (expected.get("bytes"), expected.get("sha256")),
     }
     if name == "awarded_index.json":
+        result["count"] = parsed.get("count")
+        result["index_descriptor"] = parsed
+    elif name.startswith("awarded_index_parts/") and name.endswith(".json"):
         assert awarded_as_of is not None, "remote manifest as_of is missing"
-        assert_awarded_lifecycle_contract(
-            parsed.get("records") or [],
+        result["index_refs"] = validate_awarded_index_part(
+            name,
+            parsed,
             as_of=awarded_as_of,
         )
-        refs = {}
-        for row in parsed.get("records") or []:
-            ref = str(row["ref"])
-            if ref in refs:
-                raise AssertionError(f"duplicate remote awarded index ref: {ref}")
-            expected_shard = f"{shard_for_ref(ref):02d}"
-            if row.get("_detailShard") != expected_shard:
-                raise AssertionError(f"remote awarded index shard mismatch: {ref}")
-            refs[ref] = expected_shard
-        result["index_refs"] = refs
     elif name.startswith("awarded_details/") and name.endswith(".json"):
         shard = Path(name).stem
         refs = set()
@@ -374,10 +542,49 @@ def verify_remote_assets(
             raise AssertionError(f"remote dataset asset not checksummed: {file_name}")
         if dataset.get("count") is not None and results[file_name].get("count") != dataset["count"]:
             raise AssertionError(f"remote dataset count mismatch: {dataset['id']}")
+        if dataset.get("id") == "awarded" and dataset.get("indexParts") != awarded_index_part_config():
+            raise AssertionError("remote awarded dataset index part config mismatch")
 
-    index_refs = (results.get("awarded_index.json") or {}).get("index_refs")
-    if index_refs is None:
-        raise AssertionError("remote awarded index missing")
+    index_result = results.get("awarded_index.json") or {}
+    index_descriptor = index_result.get("index_descriptor")
+    assert isinstance(index_descriptor, dict), "remote awarded index descriptor missing"
+    part_descriptors = validate_awarded_index_descriptor(
+        index_descriptor
+    )
+    expected_part_files = set(part_descriptors)
+    manifest_part_files = {
+        name
+        for name in assets
+        if name.startswith("awarded_index_parts/") and name.endswith(".json")
+    }
+    if manifest_part_files != expected_part_files:
+        raise AssertionError("remote awarded index manifest has stale or missing parts")
+
+    index_refs: dict[str, str] = {}
+    for name, descriptor in part_descriptors.items():
+        expected = assets.get(name) or {}
+        result = results.get(name) or {}
+        if not result:
+            raise AssertionError(f"remote awarded index part missing: {name}")
+        if descriptor["bytes"] != expected.get("bytes"):
+            raise AssertionError(f"remote awarded index part byte descriptor mismatch: {name}")
+        if descriptor["sha256"] != expected.get("sha256"):
+            raise AssertionError(f"remote awarded index part SHA descriptor mismatch: {name}")
+        if descriptor["count"] != expected.get("records"):
+            raise AssertionError(f"remote awarded index part count descriptor mismatch: {name}")
+        if descriptor["count"] != result.get("count"):
+            raise AssertionError(f"remote awarded index part count mismatch: {name}")
+        refs = result.get("index_refs") or {}
+        overlap = set(index_refs) & set(refs)
+        if overlap:
+            raise AssertionError(
+                f"duplicate refs across remote awarded index parts: {sorted(overlap)[:3]}"
+            )
+        index_refs.update(refs)
+    if len(index_refs) != index_descriptor["count"]:
+        raise AssertionError("remote awarded index union/count mismatch")
+    index_result["index_refs"] = index_refs
+
     detail_refs: set[str] = set()
     for shard in range(SHARD_COUNT):
         name = f"awarded_details/{shard:02d}.json"

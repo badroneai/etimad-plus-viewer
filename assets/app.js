@@ -1,6 +1,9 @@
 (() => {
   const DATA = "./data";
   const PAGE = 40;
+  const HASH_SHA_LENGTH = 12;
+  const HAS_DOM = typeof document !== "undefined";
+  const SEARCH_BLOBS = new WeakMap();
 
   const GROUPS = [
     { id: "tenders", title: "المنافسات" },
@@ -177,11 +180,15 @@
     type: "",
     page: 1,
     cache: {},
+    datasetPayloads: {},
+    datasetLoads: {},
     byRef: new Map(),
     currentRows: [],
+    detailReturnHash: "",
+    focusBeforeDetail: null,
   };
 
-  const el = {
+  const el = HAS_DOM ? {
     statStrip: document.getElementById("statStrip"),
     metaLine: document.getElementById("metaLine"),
     catalog: document.getElementById("catalog"),
@@ -197,6 +204,7 @@
     gridBody: document.getElementById("gridBody"),
     cardList: document.getElementById("cardList"),
     pager: document.getElementById("pager"),
+    explorerError: document.getElementById("explorerError"),
     detailRoot: document.getElementById("detailRoot"),
     detailRef: document.getElementById("detailRef"),
     detailTitle: document.getElementById("detailTitle"),
@@ -207,7 +215,7 @@
     copyRef: document.getElementById("copyRef"),
     detailClose: document.getElementById("detailClose"),
     detailBackdrop: document.getElementById("detailBackdrop"),
-  };
+  } : {};
 
   function fmt(n) {
     if (n == null || n === "" || Number.isNaN(Number(n))) return "—";
@@ -262,10 +270,45 @@
     });
   }
 
+  function contentAddressedUrl(file, manifest = state.manifest) {
+    const cleanFile = String(file).replace(/^\.\//, "");
+    const sha = manifest?.assets?.[cleanFile]?.sha256;
+    const version = sha ? `?v=${encodeURIComponent(String(sha).slice(0, HASH_SHA_LENGTH))}` : "";
+    return `${DATA}/${cleanFile}${version}`;
+  }
+
+  function clearExplorerError() {
+    if (!el.explorerError) return;
+    el.explorerError.textContent = "";
+    el.explorerError.hidden = true;
+  }
+
+  function showExplorerError(message) {
+    const text = String(message || "تعذر إكمال العملية. حاول مرة أخرى.");
+    if (el.explorerError) {
+      el.explorerError.textContent = text;
+      el.explorerError.hidden = false;
+    }
+    if (el.setMeta) el.setMeta.textContent = text;
+    if (el.gridBody) {
+      el.gridBody.innerHTML = `<tr><td role="alert">${esc(text)}</td></tr>`;
+    }
+    if (el.cardList) {
+      el.cardList.innerHTML = `<p class="explorer-error" role="alert">${esc(text)}</p>`;
+    }
+  }
+
+  function errorText(err) {
+    if (err instanceof Error && err.message) return err.message;
+    return String(err || "خطأ غير معروف");
+  }
+
   async function loadJSON(file, label) {
     if (state.cache[file]) return state.cache[file];
-    el.setMeta.textContent = `جاري تحميل ${label || "البيانات"}…`;
-    const res = await fetch(`${DATA}/${file}`, { cache: "no-store" });
+    if (el.setMeta) el.setMeta.textContent = `جاري تحميل ${label || "البيانات"}…`;
+    const res = await fetch(contentAddressedUrl(file), {
+      cache: file === "manifest.json" ? "no-cache" : "default",
+    });
     if (!res.ok) throw new Error(`تعذر التحميل (${res.status})`);
     const text = await res.text();
     if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
@@ -282,6 +325,7 @@
   }
 
   function indexTenders(rows, source) {
+    prepareSearchRows(rows);
     for (const row of rows) {
       if (!row?.ref) continue;
       const prev = state.byRef.get(String(row.ref));
@@ -300,34 +344,50 @@
     return (state.manifest?.datasets || []).find((dataset) => dataset.id === "awarded");
   }
 
-  async function computedShard(ref) {
-    const config = awardedDataset()?.detailShards;
-    if (!config || !globalThis.crypto?.subtle) return null;
+  async function computedShard(
+    ref,
+    config = awardedDataset()?.detailShards,
+    cryptoProvider = globalThis.crypto
+  ) {
+    if (!config || !cryptoProvider?.subtle) return null;
     const digest = new Uint8Array(
-      await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(ref)))
+      await cryptoProvider.subtle.digest("SHA-256", new TextEncoder().encode(String(ref)))
     );
-    return String(digest[0] % config.count).padStart(2, "0");
+    const width = Math.max(2, String(Math.max(0, Number(config.count) - 1)).length);
+    return String(digest[0] % config.count).padStart(width, "0");
   }
 
   async function loadAwardedDetail(ref, hint = null) {
     const dataset = awardedDataset();
     const config = dataset?.detailShards;
     if (!dataset || !config) return hint;
-    let shard = hint?._detailShard || (await computedShard(ref));
-    if (shard == null) {
-      const index = await loadJSON(dataset.file, dataset.title);
-      const indexRow = (index.records || []).find((record) => String(record.ref) === String(ref));
-      shard = indexRow?._detailShard;
-      hint = hint || indexRow;
+    try {
+      let shard = hint?._detailShard || (await computedShard(ref, config));
+      if (shard == null) {
+        const index =
+          state.datasetPayloads.awarded || (await loadJSON(dataset.file, dataset.title));
+        const indexRow = (index.records || []).find(
+          (record) => String(record.ref) === String(ref)
+        );
+        shard = indexRow?._detailShard;
+        hint = hint || indexRow;
+      }
+      if (shard == null) return hint;
+      const file = config.pathTemplate.replace("{shard}", String(shard).padStart(2, "0"));
+      const payload = await loadJSON(file, `تفاصيل المرجع ${ref}`);
+      prepareSearchRows(payload.records || []);
+      for (const detail of payload.records || []) {
+        const complete = { ...detail, _detailComplete: true, _datasetSource: "awarded" };
+        state.byRef.set(String(detail.ref), complete);
+      }
+      return state.byRef.get(String(ref)) || hint;
+    } catch (err) {
+      const wrapped = new Error(`تعذر تحميل تفاصيل المنافسة ${ref}. ${errorText(err)}`);
+      if (err instanceof Error) wrapped.cause = err;
+      wrapped.reportedToExplorer = true;
+      showExplorerError(wrapped.message);
+      throw wrapped;
     }
-    if (shard == null) return hint;
-    const file = config.pathTemplate.replace("{shard}", String(shard).padStart(2, "0"));
-    const payload = await loadJSON(file, `تفاصيل المرجع ${ref}`);
-    for (const detail of payload.records || []) {
-      const complete = { ...detail, _detailComplete: true, _datasetSource: "awarded" };
-      state.byRef.set(String(detail.ref), complete);
-    }
-    return state.byRef.get(String(ref)) || hint;
   }
 
   function datasetsInGroup(group) {
@@ -338,12 +398,161 @@
     return (state.manifest?.datasets || []).find((d) => d.id === state.datasetId);
   }
 
+  function progressiveParts(dataset, descriptor) {
+    const config = dataset?.indexParts || descriptor?.meta?.indexParts;
+    if (!config) return [];
+    if (Array.isArray(descriptor?.parts) && descriptor.parts.length) {
+      return descriptor.parts.map((part, index) => {
+        if (typeof part === "string") return { part: String(index).padStart(2, "0"), file: part };
+        return part;
+      });
+    }
+    const count = Number(config.count || 0);
+    const width = Math.max(2, String(Math.max(0, count - 1)).length);
+    return Array.from({ length: count }, (_, index) => {
+      const part = String(index).padStart(width, "0");
+      return {
+        part,
+        file: String(config.pathTemplate || "").replace("{part}", part),
+      };
+    });
+  }
+
+  async function materializeDataset(dataset, descriptor) {
+    const parts = progressiveParts(dataset, descriptor);
+    if (!parts.length) {
+      prepareSearchRows(descriptor.records || []);
+      state.datasetPayloads[dataset.id] = descriptor;
+      return descriptor;
+    }
+
+    const aggregate = {
+      ...descriptor,
+      records: [],
+      _partsLoaded: 0,
+      _partsTotal: parts.length,
+      _partsComplete: false,
+    };
+    state.datasetPayloads[dataset.id] = aggregate;
+
+    for (const [index, part] of parts.entries()) {
+      if (!part.file) throw new Error(`جزء الفهرس ${index + 1} بلا مسار ملف`);
+      const payload = await loadJSON(
+        part.file,
+        `${dataset.title} — الجزء ${index + 1} من ${parts.length}`
+      );
+      const records = payload.records || [];
+      prepareSearchRows(records);
+      aggregate.records.push(...records);
+      aggregate._partsLoaded = index + 1;
+      if (TENDER_SETS.has(dataset.id)) indexTenders(records, dataset.id);
+      if (state.datasetId === dataset.id) {
+        renderTable();
+        if (el.setMeta) {
+          el.setMeta.textContent = `تم تحميل ${fmt(index + 1)} من ${fmt(parts.length)} أجزاء · ${fmt(
+            aggregate.records.length
+          )} سجل`;
+        }
+      }
+    }
+    aggregate._partsComplete = true;
+    return aggregate;
+  }
+
+  async function loadDatasetPayload(dataset) {
+    const existing = state.datasetPayloads[dataset.id];
+    if (existing && (!existing._partsTotal || existing._partsComplete)) return existing;
+    if (state.datasetLoads[dataset.id]) return state.datasetLoads[dataset.id];
+
+    const loading = (async () => {
+      const descriptor = await loadJSON(dataset.file, dataset.title);
+      return materializeDataset(dataset, descriptor);
+    })();
+    state.datasetLoads[dataset.id] = loading;
+    try {
+      return await loading;
+    } finally {
+      delete state.datasetLoads[dataset.id];
+    }
+  }
+
   function fillSelect(select, values, placeholder) {
     const cur = select.value;
     select.innerHTML =
       `<option value="">${placeholder}</option>` +
       values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
     if ([...select.options].some((o) => o.value === cur)) select.value = cur;
+  }
+
+  function buildExplorerHash(snapshot = state) {
+    const params = new URLSearchParams();
+    params.set("dataset", snapshot.datasetId || "open");
+    if (snapshot.q) params.set("q", snapshot.q);
+    if (snapshot.region) params.set("region", snapshot.region);
+    if (snapshot.activity) params.set("activity", snapshot.activity);
+    if (snapshot.type) params.set("type", snapshot.type);
+    params.set("page", String(Math.max(1, Number(snapshot.page) || 1)));
+    return `#explorer?${params.toString()}`;
+  }
+
+  function parseRouteHash(hash) {
+    const raw = String(hash || "#home").replace(/^#/, "");
+    if (raw.startsWith("t/")) {
+      let tenderRef = raw.slice(2);
+      try {
+        tenderRef = decodeURIComponent(tenderRef);
+      } catch {
+        // Keep the literal fragment so a malformed external link gets a useful
+        // not-found message instead of aborting application routing.
+      }
+      return {
+        view: "explorer",
+        tenderRef,
+        explorer: null,
+      };
+    }
+    const [path, query = ""] = raw.split("?", 2);
+    const view = VIEWS.includes(path) ? path : "home";
+    if (view !== "explorer") return { view, tenderRef: null, explorer: null };
+    const params = new URLSearchParams(query);
+    const page = Number.parseInt(params.get("page") || "1", 10);
+    return {
+      view,
+      tenderRef: null,
+      explorer: {
+        datasetId: params.get("dataset") || "open",
+        q: params.get("q") || "",
+        region: params.get("region") || "",
+        activity: params.get("activity") || "",
+        type: params.get("type") || "",
+        page: Number.isFinite(page) && page > 0 ? page : 1,
+      },
+    };
+  }
+
+  function applyExplorerState(next = {}) {
+    state.q = String(next.q || "");
+    state.region = String(next.region || "");
+    state.activity = String(next.activity || "");
+    state.type = String(next.type || "");
+    state.page = Math.max(1, Number.parseInt(next.page, 10) || 1);
+    if (el.search) el.search.value = state.q;
+  }
+
+  function syncExplorerHash() {
+    if (!HAS_DOM || state.view !== "explorer" || location.hash.startsWith("#t/")) return;
+    const next = buildExplorerHash();
+    if (location.hash !== next) history.replaceState(null, "", next);
+  }
+
+  function selectStateValue(select, value, stateKey, { preserveMissing = false } = {}) {
+    if (!select) return;
+    const valid = [...select.options].some((option) => option.value === value);
+    if (valid) select.value = value;
+    else {
+      select.value = "";
+      if (!preserveMissing) state[stateKey] = "";
+    }
   }
 
   function regionTokens(raw) {
@@ -437,8 +646,8 @@
       .join("");
   }
 
-  function rowSearchBlob(row) {
-    return Object.values(row)
+  function buildSearchBlob(row) {
+    return Object.values(row || {})
       .flatMap((v) => {
         if (v == null) return [];
         if (typeof v === "object") return [JSON.stringify(v)];
@@ -448,13 +657,28 @@
       .toLowerCase();
   }
 
-  function filterRows(rows) {
+  function prepareSearchRows(rows) {
+    for (const row of rows || []) {
+      if (row && typeof row === "object" && !SEARCH_BLOBS.has(row)) {
+        SEARCH_BLOBS.set(row, buildSearchBlob(row));
+      }
+    }
+    return rows;
+  }
+
+  function rowSearchBlob(row) {
+    if (!row || typeof row !== "object") return buildSearchBlob(row);
+    if (!SEARCH_BLOBS.has(row)) SEARCH_BLOBS.set(row, buildSearchBlob(row));
+    return SEARCH_BLOBS.get(row);
+  }
+
+  function filterRows(rows, filters = state) {
     let out = rows;
-    const q = state.q.trim().toLowerCase();
+    const q = String(filters.q || "").trim().toLowerCase();
     if (q) out = out.filter((r) => rowSearchBlob(r).includes(q));
-    if (state.region) out = out.filter((r) => rowMatchesRegion(r, state.region));
-    if (state.activity) out = out.filter((r) => r.activity === state.activity);
-    if (state.type) out = out.filter((r) => r.type === state.type);
+    if (filters.region) out = out.filter((r) => rowMatchesRegion(r, filters.region));
+    if (filters.activity) out = out.filter((r) => r.activity === filters.activity);
+    if (filters.type) out = out.filter((r) => r.type === filters.type);
     return out;
   }
 
@@ -668,7 +892,7 @@
   function renderTable() {
     const ds = currentDataset();
     if (!ds) return;
-    const raw = state.cache[ds.file];
+    const raw = state.datasetPayloads[ds.id] || state.cache[ds.file];
     if (!raw) return;
 
     if (ds.group === "meta" && !Array.isArray(raw.records)) {
@@ -677,12 +901,17 @@
     }
 
     let rows = Array.isArray(raw) ? raw : raw.records || [];
+    prepareSearchRows(rows);
+    const preserveProgressiveFilter = Boolean(raw._partsTotal && !raw._partsComplete);
     if (TENDER_SETS.has(ds.id)) {
       if (el.filterRegion) el.filterRegion.hidden = false;
       el.filterActivity.hidden = false;
       el.filterType.hidden = false;
       if (el.filterRegion) {
         fillSelect(el.filterRegion, collectRegions(rows), "كل المناطق");
+        selectStateValue(el.filterRegion, state.region, "region", {
+          preserveMissing: preserveProgressiveFilter,
+        });
       }
       fillSelect(
         el.filterActivity,
@@ -691,6 +920,9 @@
         ),
         "كل الأنشطة"
       );
+      selectStateValue(el.filterActivity, state.activity, "activity", {
+        preserveMissing: preserveProgressiveFilter,
+      });
       fillSelect(
         el.filterType,
         [...new Set(rows.map((r) => r.type).filter(Boolean))].sort((a, b) =>
@@ -698,6 +930,9 @@
         ),
         "كل الأنواع"
       );
+      selectStateValue(el.filterType, state.type, "type", {
+        preserveMissing: preserveProgressiveFilter,
+      });
     } else {
       if (el.filterRegion) el.filterRegion.hidden = true;
       el.filterActivity.hidden = true;
@@ -706,12 +941,21 @@
 
     rows = filterRows(rows);
     state.currentRows = rows;
-    const pages = Math.max(1, Math.ceil(rows.length / PAGE));
-    state.page = Math.min(Math.max(1, state.page), pages);
+    const hasActiveFilters = Boolean(state.q || state.region || state.activity || state.type);
+    const progressiveTotal =
+      preserveProgressiveFilter && !hasActiveFilters && Number.isFinite(Number(raw.count))
+        ? Number(raw.count)
+        : rows.length;
+    let pages = Math.max(1, Math.ceil(progressiveTotal / PAGE));
+    state.page = Math.max(1, state.page);
+    if (preserveProgressiveFilter) pages = Math.max(pages, state.page);
+    else state.page = Math.min(state.page, pages);
     const slice = rows.slice((state.page - 1) * PAGE, state.page * PAGE);
     const cols = columnsFor(ds.id, slice[0]);
 
-    el.gridHead.innerHTML = `<tr>${cols.map((c) => `<th>${esc(c.label)}</th>`).join("")}</tr>`;
+    el.gridHead.innerHTML = `<tr>${cols
+      .map((c) => `<th scope="col">${esc(c.label)}</th>`)
+      .join("")}</tr>`;
     if (!slice.length) {
       el.gridBody.innerHTML = `<tr><td colspan="${cols.length}">لا نتائج في هذه المجموعة.</td></tr>`;
       if (el.cardList) el.cardList.innerHTML = `<p class="empty-hint">لا نتائج في هذه المجموعة.</p>`;
@@ -743,6 +987,8 @@
       metaLine += ` · ${fmt(arCount)} اسم إنجليزي مُعرَّب`;
     }
     el.setMeta.textContent = metaLine;
+    clearExplorerError();
+    syncExplorerHash();
   }
 
   function kv(pairs) {
@@ -835,8 +1081,12 @@
 
   function openDetail(row) {
     if (!row) {
-      el.setMeta.textContent = "تعذر العثور على سجل التفاصيل.";
+      showExplorerError("تعذر العثور على سجل التفاصيل في البيانات المحلية.");
       return;
+    }
+    clearExplorerError();
+    if (HAS_DOM && !el.detailRoot.contains(document.activeElement)) {
+      state.focusBeforeDetail = document.activeElement;
     }
     el.detailRef.textContent = `المرجع ${row.ref || "—"}`;
 
@@ -999,53 +1249,95 @@
     document.body.classList.add("detail-open");
     const panel = el.detailRoot.querySelector(".detail-panel");
     if (panel) panel.scrollTop = 0;
+    if (!location.hash.startsWith("#t/")) state.detailReturnHash = buildExplorerHash();
+    else if (!state.detailReturnHash) state.detailReturnHash = buildExplorerHash();
     history.replaceState(null, "", `#t/${encodeURIComponent(row.ref || "")}`);
     el.setMeta.textContent = `تم تحميل تفاصيل المرجع ${row.ref || "—"}`;
+    el.detailClose.focus();
   }
 
-  function closeDetail() {
+  function closeDetail({ updateHash = true } = {}) {
+    if (!el.detailRoot?.classList.contains("is-open")) return;
     el.detailRoot.classList.remove("is-open");
     el.detailRoot.setAttribute("aria-hidden", "true");
     document.body.classList.remove("detail-open");
-    if (location.hash.startsWith("#t/")) {
-      history.replaceState(null, "", "#explorer");
+    if (updateHash && location.hash.startsWith("#t/")) {
+      history.replaceState(null, "", state.detailReturnHash || buildExplorerHash());
     }
-    renderTable();
+    const target = state.focusBeforeDetail;
+    state.focusBeforeDetail = null;
+    if (target?.isConnected && typeof target.focus === "function") target.focus();
   }
 
   async function openByRef(ref) {
     if (!ref) return;
+    clearExplorerError();
     const key = String(ref);
-    let row = state.byRef.get(key);
-    if (row?._detailShard && !row._detailComplete) {
-      row = await loadAwardedDetail(key, row);
-    }
-    if (!row) {
-      // The complete open set is already loaded by ensureExplorer. Try exactly
-      // one deterministic award shard before any secondary sample.
-      row = await loadAwardedDetail(key);
-    }
-    if (!row) {
-      // Secondary samples are a final fallback only; derived 7/30 sets add no refs.
-      for (const id of ["ssr_tenders"]) {
-        const ds = (state.manifest.datasets || []).find((d) => d.id === id);
-        if (!ds) continue;
-        if (!state.cache[ds.file]) {
-          try {
-            const json = await loadJSON(ds.file);
-            indexTenders(json.records || [], id);
-          } catch {
-            /* continue */
-          }
-        }
-        row = state.byRef.get(key);
-        if (row) break;
+    try {
+      let row = state.byRef.get(key);
+      if (row?._detailShard && !row._detailComplete) {
+        row = await loadAwardedDetail(key, row);
       }
+      if (!row) {
+        // The complete open set is already loaded by ensureExplorer. Try exactly
+        // one deterministic award shard before any secondary sample.
+        row = await loadAwardedDetail(key);
+      }
+      if (!row) {
+        // Secondary samples are a final fallback only; derived 7/30 sets add no refs.
+        for (const id of ["ssr_tenders"]) {
+          const ds = (state.manifest.datasets || []).find((d) => d.id === id);
+          if (!ds) continue;
+          if (!state.cache[ds.file]) {
+            const json = await loadJSON(ds.file, ds.title);
+            indexTenders(json.records || [], id);
+          }
+          row = state.byRef.get(key);
+          if (row) break;
+        }
+      }
+      if (row?._datasetSource === "ssr_tenders") {
+        row = await loadAwardedDetail(key, row);
+      }
+      if (!row) {
+        showExplorerError(`لم يُعثر على المنافسة ذات المرجع ${key} في اللقطة الحالية.`);
+        return null;
+      }
+      openDetail(row);
+      return row;
+    } catch (err) {
+      if (!err?.reportedToExplorer) {
+        showExplorerError(`تعذر فتح المرجع ${key}. ${errorText(err)}`);
+      }
+      return null;
     }
-    if (row?._datasetSource === "ssr_tenders") {
-      row = await loadAwardedDetail(key, row);
+  }
+
+  function trapDetailFocus(event) {
+    if (event.key !== "Tab" || !el.detailRoot?.classList.contains("is-open")) return;
+    const panel = el.detailRoot.querySelector(".detail-panel");
+    const focusable = [
+      ...panel.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ),
+    ].filter((node) => !node.hidden && node.getAttribute("aria-hidden") !== "true");
+    if (!focusable.length) {
+      event.preventDefault();
+      panel.focus();
+      return;
     }
-    openDetail(row);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (!panel.contains(document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   function showView(view, { updateHash = true } = {}) {
@@ -1064,59 +1356,87 @@
     if (footer) footer.hidden = view !== "home";
 
     if (updateHash && !location.hash.startsWith("#t/")) {
-      const next = `#${view}`;
+      const next = view === "explorer" ? buildExplorerHash() : `#${view}`;
       if (location.hash !== next) history.replaceState(null, "", next);
     }
     window.scrollTo(0, 0);
   }
 
-  async function ensureExplorer() {
-    if (state.explorerReady) return;
+  async function ensureExplorer(explorerState = null) {
     renderGroupTabs();
     renderDatasetTabs();
-    await selectDataset(state.datasetId || "open", { navigate: false });
+    const requested = explorerState?.datasetId || state.datasetId || "open";
+    const exists = (state.manifest.datasets || []).some((dataset) => dataset.id === requested);
+    const target = exists ? requested : "open";
+    if (
+      state.explorerReady &&
+      state.datasetId === target &&
+      state.datasetPayloads[target]
+    ) {
+      if (explorerState) applyExplorerState(explorerState);
+      renderTable();
+      return;
+    }
+    await selectDataset(target, {
+      navigate: false,
+      resetState: !explorerState,
+      explorerState,
+      updateHash: false,
+    });
     state.explorerReady = true;
   }
 
-  async function selectDataset(id, { navigate = true } = {}) {
+  async function selectDataset(
+    id,
+    { navigate = true, resetState = true, explorerState = null, updateHash = true } = {}
+  ) {
     const ds = (state.manifest.datasets || []).find((d) => d.id === id);
     if (!ds) return;
     if (navigate) showView("explorer");
     state.datasetId = id;
     state.group = ds.group;
-    state.page = 1;
-    state.q = "";
-    state.region = "";
-    state.activity = "";
-    state.type = "";
-    if (el.search) el.search.value = "";
+    if (explorerState) applyExplorerState(explorerState);
+    else if (resetState) applyExplorerState({ page: 1 });
     if (el.filterRegion) el.filterRegion.value = "";
+    if (el.filterActivity) el.filterActivity.value = "";
+    if (el.filterType) el.filterType.value = "";
     renderGroupTabs();
     renderDatasetTabs();
+    clearExplorerError();
+    if (updateHash) syncExplorerHash();
     el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
     if (el.cardList) el.cardList.innerHTML = `<p class="empty-hint">جاري التحميل…</p>`;
     try {
-      const json = await loadJSON(ds.file, ds.title);
-      if (TENDER_SETS.has(id)) indexTenders(json.records || [], id);
+      const json = await loadDatasetPayload(ds);
+      if (TENDER_SETS.has(id) && !json._partsTotal) indexTenders(json.records || [], id);
       renderTable();
       state.explorerReady = true;
+      if (updateHash) syncExplorerHash();
     } catch (err) {
-      el.gridBody.innerHTML = `<tr><td>فشل التحميل: ${esc(err.message || err)}</td></tr>`;
-      el.setMeta.textContent = String(err.message || err);
+      showExplorerError(`تعذر تحميل مجموعة «${ds.title}». ${errorText(err)}`);
+      if (updateHash) syncExplorerHash();
     }
   }
 
   async function routeFromHash() {
-    const raw = (location.hash || "#home").replace(/^#/, "");
-    if (raw.startsWith("t/")) {
+    const route = parseRouteHash(location.hash);
+    if (route.tenderRef != null) {
       showView("explorer", { updateHash: false });
       await ensureExplorer();
-      await openByRef(decodeURIComponent(raw.slice(2)));
+      await openByRef(route.tenderRef);
       return;
     }
-    const view = VIEWS.includes(raw) ? raw : "home";
-    showView(view, { updateHash: false });
-    if (view === "explorer") await ensureExplorer();
+    if (el.detailRoot.classList.contains("is-open")) closeDetail({ updateHash: false });
+    showView(route.view, { updateHash: false });
+    if (route.view === "explorer") await ensureExplorer(route.explorer);
+  }
+
+  function debounce(callback, wait = 150) {
+    let timer = null;
+    return (...args) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => callback(...args), wait);
+    };
   }
 
   function bind() {
@@ -1157,11 +1477,11 @@
       routeFromHash();
     });
 
-    el.search.addEventListener("input", () => {
+    el.search.addEventListener("input", debounce(() => {
       state.q = el.search.value;
       state.page = 1;
       renderTable();
-    });
+    }, 150));
     if (el.filterRegion) {
       el.filterRegion.addEventListener("change", () => {
         state.region = el.filterRegion.value;
@@ -1202,6 +1522,7 @@
     el.detailBackdrop.addEventListener("click", closeDetail);
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closeDetail();
+      else trapDetailFocus(e);
     });
 
     el.copyRef.addEventListener("click", async () => {
@@ -1230,5 +1551,18 @@
     }
   }
 
-  boot();
+  const testApi = {
+    buildExplorerHash,
+    computedShard,
+    contentAddressedUrl,
+    filterRows,
+    loadAwardedDetail,
+    loadDatasetPayload,
+    parseRouteHash,
+    prepareSearchRows,
+    progressiveParts,
+    state,
+  };
+  if (typeof module !== "undefined" && module.exports) module.exports = testApi;
+  if (HAS_DOM) boot();
 })();

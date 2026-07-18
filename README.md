@@ -12,9 +12,11 @@ https://badroneai.github.io/etimad-plus-viewer/
 محلي. راجع [CLOUD_OPERATIONS.md](CLOUD_OPERATIONS.md) لمصادر الحقيقة، وتسلسل
 النشر، وفحوص السلامة، وإجراءات التشخيص.
 
-## عقد البيانات v2
+## عقد البيانات v3
 
-- `data/awarded_index.json`: فهرس بحث/جدول صغير بلا مصفوفات العروض الثقيلة.
+- `data/awarded_index.json`: descriptor صغير يعلن أجزاء فهرس البحث الحتمية.
+- `data/awarded_index_parts/00.json` … `15.json`: سجلات الجدول موزعة حسب
+  SHA-256 للمرجع، وتُحمّل تدريجيًا بدل تنزيل أصل 27MB دفعة واحدة.
 - `data/awarded_details/00.json` … `63.json`: تفاصيل كاملة موزعة بثبات حسب أول بايت من SHA-256 للمرجع.
 - فتح بطاقة ترسية يحمّل شارد تفاصيل واحداً فقط؛ لا يوجد `data/awarded.json` أحادي ضخم ولا اعتماد على Git LFS.
 - `data/manifest.json`: رقم المخطط، هوية اللقطة، أوقات المصادر، أسبقية الدمج، وSHA-256/الحجم/العدد لكل أصل.
@@ -51,7 +53,10 @@ python3 scripts/export_warehouse.py \
 
 ```bash
 python3 -m unittest discover -s tests -v
+python3 -m ruff check .
+python3 -m mypy .
 node --check assets/app.js
+node --test tests/test_app.cjs
 python3 scripts/check_data_contract.py --expect-snapshot-id "run_123_1"
 ```
 
@@ -73,3 +78,12 @@ python3 -m http.server 8080
 ```
 
 افتح `http://localhost:8080`.
+
+## الوثائق والترخيص
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): بنية الإسقاط والواجهة وعقد الأصول.
+- [CLOUD_OPERATIONS.md](CLOUD_OPERATIONS.md): دورة النشر والتحقق والتشخيص.
+- [LANGUAGE_POLICY.md](LANGUAGE_POLICY.md): العربية للمنتج والتشغيل والإنجليزية للكود.
+- [CHANGELOG.md](CHANGELOG.md): سجل التغييرات المؤثرة.
+
+المشروع خاص وحقوقه محفوظة وفق [LICENSE](LICENSE).
