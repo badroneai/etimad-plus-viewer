@@ -1808,6 +1808,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "unknown": len(lifecycle_maps["unknown"]),
         "awarded": len(awarded_map),
     }
+    official_observed_records = sum(
+        1
+        for record in official.values()
+        if (record.get("_provenance") or {}).get("primary")
+        == "etimad_official_visitor"
+    )
     completeness = {
         "officialUniverseComplete": False,
         "phase0Awarded": awarded_truth,
@@ -1823,8 +1829,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "single_writer": True,
         "source_times": source_times,
         "official_periodic": {
-            "observed_records": len(official),
-            "announced_awards": len(awarded_official),
+            "warehouse_records": len(official),
+            "official_observed_records": official_observed_records,
+            "announced_award_records": len(awarded_official),
             "source_fetched_at": source_times.get("officialPeriodic"),
         },
         "phase0_acquisition": phase0_status,

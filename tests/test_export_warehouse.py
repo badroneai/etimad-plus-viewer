@@ -476,6 +476,11 @@ class ExportContractTests(unittest.TestCase):
             lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json")
             build(build_args(root, database, lock))
             projected = json.loads((root / "data/open.json").read_text())["records"][0]
+            status = json.loads((root / "data/fetch_status.json").read_text())
+            self.assertEqual(status["official_periodic"]["warehouse_records"], 1)
+            self.assertEqual(
+                status["official_periodic"]["official_observed_records"], 1
+            )
             self.assertEqual(
                 projected["componentDetails"]["relations"]["executionLocation"],
                 "Riyadh",
