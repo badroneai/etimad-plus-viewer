@@ -30,7 +30,12 @@ from export_warehouse import (  # noqa: E402
     shard_for_ref,
     to_halalas,
 )
-from check_data_contract import assert_awarded_lifecycle_contract, check  # noqa: E402
+from check_data_contract import (  # noqa: E402
+    assert_active_scan_progress_contract,
+    assert_awarded_lifecycle_contract,
+    assert_region_backfill_contract,
+    check,
+)
 
 
 def write_phase0_lock(path: Path, *, has_more: bool = True) -> Path:
@@ -237,6 +242,94 @@ class ExportContractTests(unittest.TestCase):
             self.assertEqual(set(baseline["awarded"]), {"AWARD-1"})
             self.assertFalse(official)
             self.assertEqual(times["phase0"], "2026-07-18T10:00:00+00:00")
+            self.assertEqual(times["meta"], {})
+
+    def test_baseline_only_successful_relations_overlay_region_with_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "official.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE baseline_tenders (
+                  reference_number TEXT PRIMARY KEY,seed_state TEXT,source_layer TEXT,
+                  imported_at TEXT,record_json TEXT,source_fetched_at TEXT
+                );
+                INSERT INTO baseline_tenders VALUES
+                  ('FILLED','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"FILLED","winAmount":1}',
+                   '2026-07-18T10:00:00+00:00'),
+                  ('PRESERVE','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"PRESERVE","winAmount":2,"region":"منطقة القصيم"}',
+                   '2026-07-18T10:00:00+00:00'),
+                  ('FAILED','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"FAILED","winAmount":3}',
+                   '2026-07-18T10:00:00+00:00'),
+                  ('INVALID','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"INVALID","winAmount":4}',
+                   '2026-07-18T10:00:00+00:00');
+                CREATE TABLE components (
+                  reference_number TEXT,component TEXT,raw_path TEXT,sha256 TEXT,parsed_json TEXT,
+                  checked_at TEXT,success_checked_at TEXT,error TEXT,parser_version INTEGER
+                );
+                INSERT INTO components VALUES
+                  ('FILLED','relations','raw/filled-relations.bin',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   '{"region":"منطقة الرياض،منطقة القصيم"}',
+                   '2026-07-18T12:02:00+00:00','2026-07-18T12:02:00+00:00',NULL,4),
+                  ('PRESERVE','relations','raw/preserve-relations.bin',
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                   '{"region":null}',
+                   '2026-07-18T12:03:00+00:00','2026-07-18T12:03:00+00:00',NULL,4),
+                  ('FAILED','relations','raw/failed-relations.bin',
+                   'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                   '{"region":"منطقة مكة المكرمة"}',
+                   '2026-07-18T12:04:00+00:00',NULL,'http_403',4),
+                  ('INVALID','relations','raw/invalid-relations.bin',
+                   'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                   '{"region":"الرياض"}',
+                   '2026-07-18T12:05:00+00:00','2026-07-18T12:05:00+00:00',NULL,4);
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            baseline, official, _ = load_official_database(database)
+            filled = baseline["awarded"]["FILLED"]
+            self.assertFalse(official)
+            self.assertEqual(filled["region"], "منطقة الرياض، منطقة القصيم")
+            self.assertEqual(
+                filled["_provenance"]["fieldSources"]["region"],
+                "etimad_official_components",
+            )
+            self.assertEqual(
+                filled["_freshness"]["relationsCheckedAt"],
+                "2026-07-18T12:02:00+00:00",
+            )
+            self.assertEqual(
+                filled["_evidence"]["relations"],
+                {
+                    "rawPath": "raw/filled-relations.bin",
+                    "sha256": "a" * 64,
+                    "parserVersion": 4,
+                    "lastAttemptedAt": "2026-07-18T12:02:00+00:00",
+                    "lastError": None,
+                },
+            )
+            self.assertEqual(
+                baseline["awarded"]["PRESERVE"]["region"],
+                "منطقة القصيم",
+            )
+            self.assertNotIn("region", baseline["awarded"]["FAILED"])
+            self.assertNotIn("region", baseline["awarded"]["INVALID"])
+
+            read_only_check = sqlite3.connect(database)
+            original = json.loads(
+                read_only_check.execute(
+                    "SELECT record_json FROM baseline_tenders WHERE reference_number='FILLED'"
+                ).fetchone()[0]
+            )
+            read_only_check.close()
+            self.assertNotIn("region", original)
 
     def test_source_fetched_at_and_real_official_observation_drive_source_times(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -387,6 +480,207 @@ class ExportContractTests(unittest.TestCase):
             self.assertNotIn("winnerfacet", repeated_status)
             contract = check(root)
             self.assertEqual(contract["awarded"], 1)
+            self.assertEqual(
+                repeated_status["active_scan"],
+                {
+                    "available": False,
+                    "reason": "official_database_metadata_absent",
+                },
+            )
+            self.assertEqual(
+                repeated_status["region_backfill"],
+                {
+                    "available": False,
+                    "reason": "official_database_metadata_absent",
+                },
+            )
+
+    def test_progress_metadata_is_copied_and_region_reflects_in_partitioned_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database = root / "official.sqlite3"
+            active_scan = {
+                "cycle_id": "active_fixture",
+                "cohort_as_of": "2026-07-18T12:00:00+00:00",
+                "denominator": 2,
+                "targets_scanned_unique": 1,
+                "targets_resolved_unique": 1,
+                "targets_absent_after_full_pass": 0,
+                "targets_remaining": 1,
+                "scanned_percent": 50.0,
+                "coverage_percent": 50.0,
+                "absence_confirmation_passes": 2,
+                "complete": False,
+                "continuity_state": "anchored",
+            }
+            region_backfill = {
+                "awarded_total": 1,
+                "initial_filled": 0,
+                "initial_missing": 1,
+                "backfilled_unique": 1,
+                "current_filled": 1,
+                "remaining": 0,
+                "backfill_percent": 100.0,
+                "overall_fill_percent": 100.0,
+            }
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE baseline_tenders (
+                  reference_number TEXT PRIMARY KEY,seed_state TEXT,source_layer TEXT,
+                  imported_at TEXT,record_json TEXT,source_fetched_at TEXT
+                );
+                INSERT INTO baseline_tenders VALUES
+                  ('REGION-AWARD','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"REGION-AWARD","winAmount":1}',
+                   '2026-07-18T10:00:00+00:00');
+                CREATE TABLE components (
+                  reference_number TEXT,component TEXT,raw_path TEXT,sha256 TEXT,parsed_json TEXT,
+                  checked_at TEXT,success_checked_at TEXT,error TEXT,parser_version INTEGER
+                );
+                INSERT INTO components VALUES
+                  ('REGION-AWARD','relations','raw/region-award-relations.bin',
+                   'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                   '{"region":"منطقة الرياض"}',
+                   '2026-07-18T12:02:00+00:00','2026-07-18T12:02:00+00:00',NULL,4);
+                CREATE TABLE meta (key TEXT PRIMARY KEY,value TEXT);
+                """
+            )
+            connection.executemany(
+                "INSERT INTO meta VALUES (?,?)",
+                (
+                    (
+                        "baseline_awarded",
+                        json.dumps(
+                            {
+                                "source_has_more": True,
+                                "source_partial": True,
+                                "source_complete": False,
+                                "source_fetched_at": "2026-07-18T10:00:00+00:00",
+                            }
+                        ),
+                    ),
+                    ("active_scan", json.dumps(active_scan)),
+                    ("region_backfill", json.dumps(region_backfill)),
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json")
+            manifest = build(build_args(root, database, lock))
+            status = json.loads((root / "data/fetch_status.json").read_text())
+            self.assertEqual(status["active_scan"], active_scan)
+            self.assertEqual(status["region_backfill"], region_backfill)
+            self.assertFalse(status["still_missing"]["active_refresh_sweep"]["complete"])
+
+            part = f"{index_part_for_ref('REGION-AWARD'):02d}"
+            index_part = json.loads(
+                (root / f"data/awarded_index_parts/{part}.json").read_text()
+            )
+            index_row = next(
+                row for row in index_part["records"] if row["ref"] == "REGION-AWARD"
+            )
+            detail_shard = index_row["_detailShard"]
+            detail_payload = json.loads(
+                (root / f"data/awarded_details/{detail_shard}.json").read_text()
+            )
+            detail = next(
+                row for row in detail_payload["records"] if row["ref"] == "REGION-AWARD"
+            )
+            self.assertEqual(index_row["region"], "منطقة الرياض")
+            self.assertEqual(detail["region"], "منطقة الرياض")
+            self.assertEqual(
+                detail["_provenance"]["fieldSources"]["region"],
+                "etimad_official_components",
+            )
+            self.assertEqual(
+                detail["_evidence"]["relations"]["sha256"],
+                "d" * 64,
+            )
+            self.assertEqual(manifest["snapshot_id"], "test_snapshot")
+            self.assertEqual(check(root)["awarded"], 1)
+
+    def test_progress_contract_rejects_bad_arithmetic_and_missing_evidence(self):
+        assert_active_scan_progress_contract(
+            {
+                "denominator": 2,
+                "targets_scanned_unique": 1,
+                "targets_resolved_unique": 1,
+                "targets_absent_after_full_pass": 0,
+                "targets_remaining": 1,
+                "scanned_percent": 50.0,
+                "coverage_percent": 50.0,
+                "absence_confirmation_passes": 2,
+                "complete": False,
+            }
+        )
+        assert_active_scan_progress_contract(
+            {
+                "denominator": 2,
+                "targets_scanned_unique": 1,
+                "targets_resolved_unique": 2,
+                "targets_absent_after_full_pass": 1,
+                "targets_remaining": 0,
+                "scanned_percent": 50.0,
+                "coverage_percent": 100.0,
+                "absence_confirmation_passes": 2,
+                "complete": True,
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, "remaining arithmetic"):
+            assert_active_scan_progress_contract(
+                {
+                    "denominator": 2,
+                    "targets_scanned_unique": 1,
+                    "targets_resolved_unique": 1,
+                    "targets_absent_after_full_pass": 0,
+                    "targets_remaining": 0,
+                    "scanned_percent": 50.0,
+                    "coverage_percent": 50.0,
+                    "absence_confirmation_passes": 2,
+                    "complete": False,
+                }
+            )
+
+        progress = {
+            "awarded_total": 1,
+            "initial_filled": 0,
+            "initial_missing": 1,
+            "backfilled_unique": 1,
+            "current_filled": 1,
+            "remaining": 0,
+            "backfill_percent": 100.0,
+            "overall_fill_percent": 100.0,
+        }
+        index = {"R": {"region": "منطقة الرياض"}}
+        detail = {
+            "R": {
+                "region": "منطقة الرياض",
+                "_provenance": {
+                    "sources": [{"id": "etimad_official_components"}],
+                    "fieldSources": {"region": "etimad_official_components"},
+                },
+                "_freshness": {"relationsCheckedAt": "2026-07-18T12:00:00+00:00"},
+                "_evidence": {
+                    "relations": {
+                        "rawPath": "raw/relations.bin",
+                        "sha256": "f" * 64,
+                        "parserVersion": 4,
+                    }
+                },
+            }
+        }
+        index["R"]["region"] = "الرياض"
+        detail["R"]["region"] = "الرياض"
+        with self.assertRaisesRegex(AssertionError, "outside the parser vocabulary"):
+            assert_region_backfill_contract(progress, index, detail)
+
+        index["R"]["region"] = "منطقة الرياض"
+        detail["R"]["region"] = "منطقة الرياض"
+        detail["R"]["_evidence"]["relations"]["sha256"] = "not-a-sha256"
+        with self.assertRaisesRegex(AssertionError, "SHA-256 invalid"):
+            assert_region_backfill_contract(progress, index, detail)
 
     def test_lifecycle_and_deadline_windows_are_recomputed_from_snapshot_time(self):
         with tempfile.TemporaryDirectory() as temp:
