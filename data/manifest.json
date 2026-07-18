@@ -1,14 +1,14 @@
 {
   "schema": "kashaf.static-warehouse",
   "schema_version": 3,
-  "snapshot_id": "run_29665843236_1",
-  "generated_at": "2026-07-18T23:50:35.522762+00:00",
-  "as_of": "2026-07-18T23:49:17.285526+00:00",
+  "snapshot_id": "run_29666052219_1",
+  "generated_at": "2026-07-18T23:57:33.971746+00:00",
+  "as_of": "2026-07-18T23:56:23.643565+00:00",
   "source_times": {
     "phase0Baseline": "2026-07-18T14:32:40.909697+00:00",
     "phase0Open": "2026-07-18T05:42:06.284419+00:00",
     "phase0Awarded": "2026-07-18T14:32:40.909697+00:00",
-    "officialPeriodic": "2026-07-18T23:49:17.285526+00:00"
+    "officialPeriodic": "2026-07-18T23:56:23.643565+00:00"
   },
   "source": "Kashaf canonical merge: official Etimad periodic + Phase-0 baseline",
   "note": "البيانات الرسمية الأحدث تتقدم في الحقول غير الفارغة، مع حفظ تاريخ وعروض وترسيات خط الأساس.",
@@ -881,14 +881,14 @@
     },
     "awarding.json": {
       "bytes": 154,
-      "sha256": "70d316da18d36a07db8b5c9429a31358dc064fe13b595866201d68e9dac8d4b1",
+      "sha256": "e0d2325b855cdef3f81f36d3bb2db0badd9719a925122864f06da03d0c717e8f",
       "contentType": "application/json",
       "records": 0,
       "role": "tender_dataset"
     },
     "cancelled.json": {
       "bytes": 155,
-      "sha256": "e6be1d70524488df59266b1242a76762e41f10090faa9f8e75648d2c45306212",
+      "sha256": "0722e91c6fc0e664f0f8a5c394b6c0ccc817c7ea7eb11da7655d6596a5a98192",
       "contentType": "application/json",
       "records": 0,
       "role": "tender_dataset"
@@ -922,8 +922,8 @@
       "records": 200
     },
     "examination.json": {
-      "bytes": 207865,
-      "sha256": "28a25073f075043d808862f6cda620355c18226bae122b839521706e92a5b5b7",
+      "bytes": 215056,
+      "sha256": "6b5009232911b6a09c5faf6b13894fee9ab54d63eff3a89f7af6c34942ad8763",
       "contentType": "application/json",
       "records": 65,
       "role": "tender_dataset"
@@ -935,8 +935,8 @@
       "role": "retained_phase0_asset"
     },
     "fetch_status.json": {
-      "bytes": 4861,
-      "sha256": "9f7ac7164a39da48111c64ede285c9e01d0097fda8b0c94a5f328a3e5ab3dc7d",
+      "bytes": 4862,
+      "sha256": "3af3fff46b5aaadd98c3a505034864ac88e8392b683f83be410914ef55472e62",
       "contentType": "application/json",
       "role": "fetch_status"
     },
@@ -947,8 +947,8 @@
       "role": "retained_phase0_asset"
     },
     "open.json": {
-      "bytes": 5281796,
-      "sha256": "18eb6bdd042bab67f5ef998e930730708f88236a0d714ef51e285235443c2cca",
+      "bytes": 5283114,
+      "sha256": "c07a68370dacae2a7b5e24a87e0455f816197d418b9632c8792c995b67bfbf72",
       "contentType": "application/json",
       "records": 1550,
       "role": "tender_dataset"
@@ -982,7 +982,7 @@
     },
     "unknown.json": {
       "bytes": 176,
-      "sha256": "b916a28631bebc1934989865cd75d947346b033230961e9ee38259b0ccb9411f",
+      "sha256": "0bd205c0dd6a3983f7f656ba8e5c7ed5926e568f17987d4157a72656fc87654c",
       "contentType": "application/json",
       "records": 0,
       "role": "tender_dataset"
@@ -995,15 +995,15 @@
       "records": 300
     },
     "within_30.json": {
-      "bytes": 5166419,
-      "sha256": "ff3193b643b119c67db8bbef8ba0eef546a9cc6ff8b5a72ae085483541220cb7",
+      "bytes": 5167935,
+      "sha256": "5eb6e0b10528590030701eb9416636a4068e6724b13c89ea8d780d09a71da98d",
       "contentType": "application/json",
       "records": 1531,
       "role": "tender_dataset"
     },
     "within_7.json": {
-      "bytes": 2587623,
-      "sha256": "b24cc7220267061d2afd5e481f31c6ff842704d68ee1c66d83c86fc191706fce",
+      "bytes": 2593217,
+      "sha256": "4fde972a6be10bc586ae16931f4470bca5f53a0b38375932674642e2f4259b09",
       "contentType": "application/json",
       "records": 770,
       "role": "tender_dataset"
@@ -1103,18 +1103,18 @@
     "companies_api.json": 10893,
     "companies_sitemap.json": 6700334,
     "companies_ssr.json": 21956,
-    "examination.json": 207865,
+    "examination.json": 215056,
     "facets_open.json": 733,
-    "fetch_status.json": 4861,
+    "fetch_status.json": 4862,
     "inventory.json": 7024,
-    "open.json": 5281796,
+    "open.json": 5283114,
     "ssr_tenders.json": 34704,
     "taxonomy_observed.json": 5653,
     "tender_refs_sitemap.json": 1257336,
     "types.json": 672,
     "unknown.json": 176,
     "winnerfacet.json": 46801,
-    "within_30.json": 5166419,
-    "within_7.json": 2587623
+    "within_30.json": 5167935,
+    "within_7.json": 2593217
   }
 }
