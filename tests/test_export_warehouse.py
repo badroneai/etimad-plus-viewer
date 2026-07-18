@@ -281,6 +281,19 @@ class ExportContractTests(unittest.TestCase):
             connection.commit()
             connection.close()
             lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json", has_more=True)
+            data = root / "data"
+            data.mkdir()
+            (data / "fetch_status.json").write_text(
+                json.dumps(
+                    {
+                        "phase": "FETCH_ONLY",
+                        "updated_at": "2026-07-18T09:00:00+00:00",
+                        "mode": "playwright_single_session_raw_first",
+                        "gate": {"meterRemaining": 600, "winnerfacet_status": 200},
+                        "canonical_projection": {"stale": True},
+                    }
+                )
+            )
             manifest = build(build_args(root, database, lock))
             awarded = json.loads((root / "data/awarded_index.json").read_text())
             status = json.loads((root / "data/fetch_status.json").read_text())
@@ -297,6 +310,32 @@ class ExportContractTests(unittest.TestCase):
             self.assertTrue(
                 status["canonical_projection"]["completeness"]["phase0Awarded"]["partial"]
             )
+            self.assertEqual(status["phase"], "CANONICAL_PERIODIC")
+            self.assertEqual(
+                status["mode"], "official_periodic_raw_first_projection"
+            )
+            self.assertEqual(
+                status["phase0_acquisition"]["phase"], "FETCH_ONLY"
+            )
+            self.assertEqual(
+                status["phase0_acquisition"]["gate"]["winnerfacet_status"], 200
+            )
+            self.assertNotIn(
+                "canonical_projection", status["phase0_acquisition"]
+            )
+            self.assertNotIn("updated_at", status["phase0_acquisition"])
+            self.assertFalse(status["phase0_acquisition"]["current"])
+            self.assertEqual(status["source"], "etimad_official_periodic")
+            phase0_status = status["phase0_acquisition"]
+            build(build_args(root, database, lock))
+            repeated_status = json.loads(
+                (root / "data/fetch_status.json").read_text()
+            )
+            self.assertEqual(
+                repeated_status["phase0_acquisition"], phase0_status
+            )
+            self.assertNotIn("gate", repeated_status)
+            self.assertNotIn("winnerfacet", repeated_status)
             contract = check(root)
             self.assertEqual(contract["awarded"], 1)
 

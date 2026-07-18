@@ -83,6 +83,18 @@ NON_TENDER_FILES = (
     "fetch_status.json",
     "inventory.json",
 )
+PHASE0_STATUS_KEYS = (
+    "phase",
+    "mode",
+    "single_writer",
+    "session_reused",
+    "gate",
+    "winnerfacet",
+    "public_company_wins",
+    "awarded",
+    "all",
+    "analysis_phase",
+)
 
 OFFICIAL_FLAG_FIELDS = {
     "hasInvitations",
@@ -1440,6 +1452,38 @@ def retain_catalogue(out: Path, assets: dict[str, dict[str, Any]]) -> tuple[dict
     return facets, status
 
 
+def phase0_acquisition_status(
+    status: dict[str, Any], source_times: dict[str, str | None]
+) -> dict[str, Any]:
+    """Keep the historical Plus fetch state separate from the current projection."""
+    existing = status.get("phase0_acquisition")
+    if isinstance(existing, dict):
+        phase0 = deepcopy(existing)
+    else:
+        phase0 = {
+            key: deepcopy(status[key])
+            for key in PHASE0_STATUS_KEYS
+            if key in status
+        }
+        if "canonical_projection" not in status and status.get("updated_at"):
+            phase0["status_updated_at"] = status["updated_at"]
+    source_fetched_at = max(
+        filter(
+            None,
+            (
+                source_times.get("phase0Awarded"),
+                source_times.get("phase0Open"),
+                source_times.get("phase0Baseline"),
+            ),
+        ),
+        default=None,
+    )
+    if source_fetched_at:
+        phase0["source_fetched_at"] = source_fetched_at
+    phase0["current"] = False
+    return phase0
+
+
 def build_datasets(out: Path, awarded_partial: bool) -> list[dict[str, Any]]:
     definitions = [
         ("open", "open.json", "منافسات مفتوحة ضمن التغطية", "tenders", True),
@@ -1769,9 +1813,23 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "phase0Awarded": awarded_truth,
         "phase0FreshnessBasis": phase0_freshness_basis,
     }
-    canonical_status = deepcopy(fetch_status)
-    canonical_status["updated_at"] = as_of_iso
-    canonical_status["obtained"] = obtained
+    phase0_status = phase0_acquisition_status(fetch_status, source_times)
+    canonical_status = {
+        "schema_version": SCHEMA_VERSION,
+        "source": "etimad_official_periodic",
+        "phase": "CANONICAL_PERIODIC",
+        "updated_at": as_of_iso,
+        "mode": "official_periodic_raw_first_projection",
+        "single_writer": True,
+        "source_times": source_times,
+        "official_periodic": {
+            "observed_records": len(official),
+            "announced_awards": len(awarded_official),
+            "source_fetched_at": source_times.get("officialPeriodic"),
+        },
+        "phase0_acquisition": phase0_status,
+        "obtained": obtained,
+    }
     canonical_status["canonical_projection"] = {
         "schemaVersion": SCHEMA_VERSION,
         "asOf": as_of_iso,
@@ -1783,7 +1841,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "unknownDeadlineExcluded": True,
         },
     }
-    still_missing = dict(canonical_status.get("still_missing") or {})
+    still_missing = dict(fetch_status.get("still_missing") or {})
     still_missing.update(
         {
             "official_universe_backfill": {
