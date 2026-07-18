@@ -53,6 +53,38 @@
     branches: "الفروع",
     winner_companies: "شركات فائزة مرصودة",
     n: "التكرار",
+    officialTenderId: "المعرّف الرسمي الرقمي",
+    officialTenderIdString: "المعرّف الرسمي المشفّر",
+    expectedAwardAt: "موعد الترسية المتوقع",
+    awardAnnouncedAt: "إعلان الترسية",
+    awardMode: "نمط الترسية",
+    awardState: "حالة الترسية",
+    awardCompleteness: "اكتمال الترسية",
+    groups: "مجموعات الترسية",
+    buyingCost: "تكلفة الشراء",
+    bookletPrice: "سعر كراسة الشروط",
+    financialFees: "الرسوم المالية",
+    invitationCost: "تكلفة الدعوة",
+    lastEnquiriesAt: "آخر موعد للاستفسارات",
+    offersOpeningAt: "موعد فتح العروض",
+    minutesLeft: "الدقائق المتبقية",
+    lastAwardCheckedAt: "آخر فحص للترسية",
+    nextAwardCheckAt: "الفحص القادم للترسية",
+    sourceKind: "نوع مصدر السجل",
+    baselineLinked: "مرتبط بخط الأساس",
+    hasInvitations: "توجد دعوات",
+    insideKSA: "داخل المملكة",
+    tenderTypeId: "معرّف نوع المنافسة",
+    activityId: "معرّف النشاط",
+    statusId: "معرّف الحالة",
+    winAmountHalalas: "قيمة الترسية بالهللات",
+    bidHalalas: "قيمة العرض بالهللات",
+    awardHalalas: "قيمة الترسية بالهللات",
+    currency: "العملة",
+    moneyConsistency: "تطابق القيم المالية",
+    winnerAwardsHalalasSum: "مجموع ترسيات الفائزين بالهللات",
+    deltaHalalas: "فرق التحقق بالهللات",
+    method: "منهج التحويل المالي",
   };
 
   const SOURCE_AR = {
@@ -61,6 +93,10 @@
     within_30: "خلال 30 يوماً",
     awarded: "المرساة",
     ssr_tenders: "عيّنة العرض الأولي",
+    etimad_plus_phase0: "اعتماد بلس — خط الأساس",
+    phase0_baseline: "خط الأساس المحفوظ",
+    etimad_official_periodic: "اعتماد الرسمية — الجلب الدوري",
+    official_plus_merged: "دمج الرسمية مع خط الأساس",
   };
 
   const META_KEY_AR = {
@@ -157,6 +193,26 @@
     return `${num.toLocaleString("ar-SA", { maximumFractionDigits: 0 })} ر.س`;
   }
 
+  function moneyFromHalalas(value) {
+    if (value == null || value === "") return "—";
+    try {
+      const halalas = BigInt(String(value));
+      const negative = halalas < 0n;
+      const absolute = negative ? -halalas : halalas;
+      const riyals = absolute / 100n;
+      const remainder = absolute % 100n;
+      const fraction = remainder
+        ? `٫${Number(remainder).toLocaleString("ar-SA", {
+            minimumIntegerDigits: 2,
+            useGrouping: false,
+          })}`
+        : "";
+      return `${negative ? "-" : ""}${riyals.toLocaleString("ar-SA")}${fraction} ر.س`;
+    } catch {
+      return String(value);
+    }
+  }
+
   function esc(s) {
     return String(s ?? "")
       .replaceAll("&", "&amp;")
@@ -183,7 +239,16 @@
     el.setMeta.textContent = `جاري تحميل ${label || "البيانات"}…`;
     const res = await fetch(`${DATA}/${file}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`تعذر التحميل (${res.status})`);
-    const json = await res.json();
+    const text = await res.text();
+    if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
+      throw new Error(`الملف ${file} مؤشر Git LFS وليس بيانات JSON`);
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(`الملف ${file} ليس JSON صالحاً`);
+    }
     state.cache[file] = json;
     return json;
   }
@@ -192,10 +257,49 @@
     for (const row of rows) {
       if (!row?.ref) continue;
       const prev = state.byRef.get(String(row.ref));
-      if (!prev || source === "awarded") {
-        state.byRef.set(String(row.ref), { ...row, _source: source });
+      const candidate = {
+        ...row,
+        _source: row._source || source,
+        _datasetSource: source,
+      };
+      if (!prev || candidate._detailComplete || (!prev._detailComplete && source === "awarded")) {
+        state.byRef.set(String(row.ref), candidate);
       }
     }
+  }
+
+  function awardedDataset() {
+    return (state.manifest?.datasets || []).find((dataset) => dataset.id === "awarded");
+  }
+
+  async function computedShard(ref) {
+    const config = awardedDataset()?.detailShards;
+    if (!config || !globalThis.crypto?.subtle) return null;
+    const digest = new Uint8Array(
+      await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(ref)))
+    );
+    return String(digest[0] % config.count).padStart(2, "0");
+  }
+
+  async function loadAwardedDetail(ref, hint = null) {
+    const dataset = awardedDataset();
+    const config = dataset?.detailShards;
+    if (!dataset || !config) return hint;
+    let shard = hint?._detailShard || (await computedShard(ref));
+    if (shard == null) {
+      const index = await loadJSON(dataset.file, dataset.title);
+      const indexRow = (index.records || []).find((record) => String(record.ref) === String(ref));
+      shard = indexRow?._detailShard;
+      hint = hint || indexRow;
+    }
+    if (shard == null) return hint;
+    const file = config.pathTemplate.replace("{shard}", String(shard).padStart(2, "0"));
+    const payload = await loadJSON(file, `تفاصيل المرجع ${ref}`);
+    for (const detail of payload.records || []) {
+      const complete = { ...detail, _detailComplete: true, _datasetSource: "awarded" };
+      state.byRef.set(String(detail.ref), complete);
+    }
+    return state.byRef.get(String(ref)) || hint;
   }
 
   function datasetsInGroup(group) {
@@ -436,6 +540,7 @@
   }
 
   function tenderExtra(row) {
+    if (row.winAmountHalalas != null) return moneyFromHalalas(row.winAmountHalalas);
     if (row.winAmount != null) return money(row.winAmount);
     if (row.days != null) return `${fmt(row.days)} يوم`;
     if (row.award) return esc(row.award);
@@ -627,14 +732,72 @@
         .map((b) => {
           const company = b.company || b.name || "—";
           const award = b.award ?? b.bid ?? b.award_text;
+          const awardHalalas = b.awardHalalas ?? b.bidHalalas;
           const won = b.won ? `<span class="won">فائز</span>` : "";
           return `<li>
             <div><strong>${esc(company)}</strong> ${won}
               ${b.key ? `<span class="meta">${esc(b.key)}</span>` : ""}</div>
-            <div>${typeof award === "number" ? money(award) : esc(award ?? "—")}</div>
+            <div>${
+              awardHalalas != null
+                ? moneyFromHalalas(awardHalalas)
+                : typeof award === "number"
+                  ? money(award)
+                  : esc(award ?? "—")
+            }</div>
           </li>`;
         })
+      .join("")}</ul></div>`;
+  }
+
+  function provenanceBlock(provenance) {
+    const sources = provenance?.sources || [];
+    if (!sources.length) return "";
+    return `<div class="detail-block"><h3>المصادر والحداثة (${fmt(sources.length)})</h3>
+      <ul class="bid-list">${sources
+        .map(
+          (source) => `<li><div><strong>${esc(
+            SOURCE_AR[source.id] || source.id || "مصدر غير مسمى"
+          )}</strong>${source.layer ? `<span class="meta">${esc(source.layer)}</span>` : ""}</div>
+            <div>${esc(dt(source.fetchedAt))}</div></li>`
+        )
         .join("")}</ul></div>`;
+  }
+
+  function groupsBlock(groups) {
+    if (!groups?.length) return "";
+    return `<div class="detail-block"><h3>مجموعات الترسية (${fmt(groups.length)})</h3>${groups
+      .map((group, index) => {
+        const title = group.label || group.name || group.groupId || `المجموعة ${index + 1}`;
+        return `<div class="ar-block"><h4>${esc(title)}</h4>${renderArabicTree(group)}</div>`;
+      })
+      .join("")}</div>`;
+  }
+
+  function moneyConsistencyBlock(consistency) {
+    if (!consistency) return "";
+    const statuses = {
+      match: "متطابق",
+      mismatch: "غير متطابق",
+      unverifiable: "غير قابل للتحقق",
+    };
+    const pairs = [
+      ["النتيجة", esc(statuses[consistency.status] || consistency.status || "—")],
+      ["قيمة الترسية الدقيقة", esc(moneyFromHalalas(consistency.winAmountHalalas))],
+      [
+        "مجموع ترسيات الفائزين",
+        esc(moneyFromHalalas(consistency.winnerAwardsHalalasSum)),
+      ],
+      ["الفرق", esc(moneyFromHalalas(consistency.deltaHalalas))],
+      [
+        "المنهج",
+        esc(
+          consistency.method === "decimal_str_halalas"
+            ? "تحويل عشري دقيق إلى هللات"
+            : consistency.method || "—"
+        ),
+      ],
+    ];
+    return `<div class="detail-block"><h3>التحقق المالي</h3>${kv(pairs)}</div>`;
   }
 
   function openDetail(row) {
@@ -667,7 +830,18 @@
     const skip = new Set([
       "winners",
       "allBids",
+      "groups",
+      "awardGroups",
+      "_provenance",
+      "_detailShard",
+      "_detailComplete",
+      "_datasetSource",
       "_source",
+      "source",
+      "winAmountHalalas",
+      "currency",
+      "moneyConsistency",
+      "ref",
       "name",
       "name_en",
       "name_ar",
@@ -689,15 +863,53 @@
       "type",
       "activity",
       "deadline",
+      "expectedAwardAt",
+      "lastEnquiriesAt",
+      "offersOpeningAt",
       "days",
       "hoursLeft",
+      "minutesLeft",
       "submit",
       "firstSeen",
       "lastSeen",
+      "lastAwardCheckedAt",
+      "nextAwardCheckAt",
       "status",
+      "officialTenderId",
+      "officialTenderIdString",
+      "awardState",
+      "awardMode",
+      "awardCompleteness",
       "bids",
       "winAmount",
+      "buyingCost",
+      "bookletPrice",
+      "financialFees",
+      "invitationCost",
+      "sourceKind",
+      "baselineLinked",
+      "hasInvitations",
+      "insideKSA",
     ];
+    const dateFields = new Set([
+      "submit",
+      "firstSeen",
+      "lastSeen",
+      "expectedAwardAt",
+      "awardAnnouncedAt",
+      "lastEnquiriesAt",
+      "offersOpeningAt",
+      "lastAwardCheckedAt",
+      "nextAwardCheckAt",
+    ]);
+    const moneyFields = new Set([
+      "winAmount",
+      "buyingCost",
+      "bookletPrice",
+      "financialFees",
+      "invitationCost",
+    ]);
+    const numberFields = new Set(["days", "hoursLeft", "minutesLeft", "bids"]);
     const seen = new Set();
     for (const k of order) {
       if (!(k in row) || skip.has(k)) continue;
@@ -708,15 +920,19 @@
         continue;
       }
       let shown = String(v);
-      if (k === "winAmount") shown = money(v);
-      else if (k === "submit" || k === "firstSeen" || k === "lastSeen") shown = dt(v);
-      else if (k === "days" || k === "hoursLeft" || k === "bids") shown = fmt(v);
+      if (k === "winAmount" && row.winAmountHalalas != null) {
+        shown = moneyFromHalalas(row.winAmountHalalas);
+      } else if (moneyFields.has(k)) shown = money(v);
+      else if (dateFields.has(k)) shown = dt(v);
+      else if (numberFields.has(k)) shown = fmt(v);
+      else if (typeof v === "boolean") shown = v ? "نعم" : "لا";
       pairs.push([labelAr(k), esc(shown)]);
     }
     for (const [k, v] of Object.entries(row)) {
       if (skip.has(k) || seen.has(k)) continue;
       if (v == null || v === "" || Array.isArray(v) || typeof v === "object") continue;
-      pairs.push([labelAr(k), esc(String(v))]);
+      const shown = typeof v === "boolean" ? (v ? "نعم" : "لا") : String(v);
+      pairs.push([labelAr(k), esc(shown)]);
     }
     pairs.push(["المتبقي (محسوب)", esc(remaining)]);
     pairs.push([
@@ -726,6 +942,9 @@
 
     el.detailBody.innerHTML = [
       kv(pairs),
+      provenanceBlock(row._provenance),
+      moneyConsistencyBlock(row.moneyConsistency),
+      groupsBlock(row.groups || row.awardGroups || []),
       bidsBlock("الفائزون", row.winners || []),
       bidsBlock("جميع العروض", row.allBids || []),
     ].join("");
@@ -736,6 +955,7 @@
     const panel = el.detailRoot.querySelector(".detail-panel");
     if (panel) panel.scrollTop = 0;
     history.replaceState(null, "", `#t/${encodeURIComponent(row.ref || "")}`);
+    el.setMeta.textContent = `تم تحميل تفاصيل المرجع ${row.ref || "—"}`;
   }
 
   function closeDetail() {
@@ -745,15 +965,24 @@
     if (location.hash.startsWith("#t/")) {
       history.replaceState(null, "", "#explorer");
     }
+    renderTable();
   }
 
   async function openByRef(ref) {
     if (!ref) return;
     const key = String(ref);
     let row = state.byRef.get(key);
+    if (row?._detailShard && !row._detailComplete) {
+      row = await loadAwardedDetail(key, row);
+    }
     if (!row) {
-      // search current filtered/unfiltered cache for tender sets
-      for (const id of TENDER_SETS) {
+      // The complete open set is already loaded by ensureExplorer. Try exactly
+      // one deterministic award shard before any secondary sample.
+      row = await loadAwardedDetail(key);
+    }
+    if (!row) {
+      // Secondary samples are a final fallback only; derived 7/30 sets add no refs.
+      for (const id of ["ssr_tenders"]) {
         const ds = (state.manifest.datasets || []).find((d) => d.id === id);
         if (!ds) continue;
         if (!state.cache[ds.file]) {
@@ -767,6 +996,9 @@
         row = state.byRef.get(key);
         if (row) break;
       }
+    }
+    if (row?._datasetSource === "ssr_tenders") {
+      row = await loadAwardedDetail(key, row);
     }
     openDetail(row);
   }

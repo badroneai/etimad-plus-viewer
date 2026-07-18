@@ -1,1 +1,2 @@
-data/awarded.json filter=lfs diff=lfs merge=lfs -text
+# Static data is intentionally stored as regular Git objects. The awarded
+# catalogue is sharded so GitHub Pages always receives usable JSON, not pointers.
