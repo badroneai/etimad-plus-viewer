@@ -504,8 +504,12 @@ class ExportContractTests(unittest.TestCase):
                 "cohort_as_of": "2026-07-18T12:00:00+00:00",
                 "denominator": 2,
                 "targets_scanned_unique": 1,
+                "targets_resolved_unique": 1,
+                "targets_absent_after_full_pass": 0,
                 "targets_remaining": 1,
+                "scanned_percent": 50.0,
                 "coverage_percent": 50.0,
+                "absence_confirmation_passes": 2,
                 "complete": False,
                 "continuity_state": "anchored",
             }
@@ -602,9 +606,26 @@ class ExportContractTests(unittest.TestCase):
             {
                 "denominator": 2,
                 "targets_scanned_unique": 1,
+                "targets_resolved_unique": 1,
+                "targets_absent_after_full_pass": 0,
                 "targets_remaining": 1,
+                "scanned_percent": 50.0,
                 "coverage_percent": 50.0,
+                "absence_confirmation_passes": 2,
                 "complete": False,
+            }
+        )
+        assert_active_scan_progress_contract(
+            {
+                "denominator": 2,
+                "targets_scanned_unique": 1,
+                "targets_resolved_unique": 2,
+                "targets_absent_after_full_pass": 1,
+                "targets_remaining": 0,
+                "scanned_percent": 50.0,
+                "coverage_percent": 100.0,
+                "absence_confirmation_passes": 2,
+                "complete": True,
             }
         )
         with self.assertRaisesRegex(AssertionError, "remaining arithmetic"):
@@ -612,8 +633,12 @@ class ExportContractTests(unittest.TestCase):
                 {
                     "denominator": 2,
                     "targets_scanned_unique": 1,
+                    "targets_resolved_unique": 1,
+                    "targets_absent_after_full_pass": 0,
                     "targets_remaining": 0,
+                    "scanned_percent": 50.0,
                     "coverage_percent": 50.0,
+                    "absence_confirmation_passes": 2,
                     "complete": False,
                 }
             )

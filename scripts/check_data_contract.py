@@ -200,14 +200,33 @@ def assert_active_scan_progress_contract(progress: object) -> None:
         )
         return
 
-    for key in ("denominator", "targets_scanned_unique", "targets_remaining"):
+    for key in (
+        "denominator",
+        "targets_scanned_unique",
+        "targets_resolved_unique",
+        "targets_absent_after_full_pass",
+        "targets_remaining",
+    ):
         assert _nonnegative_integer(progress.get(key)), f"active_scan {key} is invalid"
     denominator = progress["denominator"]
     scanned = progress["targets_scanned_unique"]
+    resolved = progress["targets_resolved_unique"]
+    absent = progress["targets_absent_after_full_pass"]
     remaining = progress["targets_remaining"]
     assert scanned <= denominator, "active_scan scanned exceeds denominator"
-    assert remaining == denominator - scanned, "active_scan remaining arithmetic mismatch"
-    expected_coverage = (scanned * 100.0 / denominator) if denominator else 0.0
+    assert resolved == scanned + absent, "active_scan resolution arithmetic mismatch"
+    assert resolved <= denominator, "active_scan resolved exceeds denominator"
+    assert remaining == denominator - resolved, "active_scan remaining arithmetic mismatch"
+    assert progress.get("absence_confirmation_passes") == 2, (
+        "active_scan absence confirmation policy mismatch"
+    )
+    expected_scanned = (scanned * 100.0 / denominator) if denominator else 0.0
+    _assert_percentage(
+        progress.get("scanned_percent"),
+        expected_scanned,
+        label="active_scan scanned_percent",
+    )
+    expected_coverage = (resolved * 100.0 / denominator) if denominator else 0.0
     _assert_percentage(
         progress.get("coverage_percent"),
         expected_coverage,
