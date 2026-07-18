@@ -10,7 +10,17 @@
     { id: "meta", title: "ميتا الجلب" },
   ];
 
-  const TENDER_SETS = new Set(["open", "within_7", "within_30", "awarded", "ssr_tenders"]);
+  const TENDER_SETS = new Set([
+    "open",
+    "within_7",
+    "within_30",
+    "awarding",
+    "examination",
+    "cancelled",
+    "unknown",
+    "awarded",
+    "ssr_tenders",
+  ]);
 
   const FIELD_AR = {
     name: "الاسم",
@@ -29,6 +39,9 @@
     firstSeen: "أول رصد في المستودع",
     lastSeen: "آخر رصد في المستودع",
     status: "الحالة",
+    tenderCategory: "تصنيف دورة الحياة",
+    tenderCategoryBasis: "دليل تصنيف دورة الحياة",
+    deadlineWindowHours: "الساعات حتى الإغلاق (محسوبة)",
     region: "المنطقة",
     bids: "عدد العروض",
     winAmount: "قيمة الترسية",
@@ -63,6 +76,7 @@
     groups: "مجموعات الترسية",
     buyingCost: "تكلفة الشراء",
     bookletPrice: "سعر كراسة الشروط",
+    condetionalBookletPrice: "سعر كراسة الشروط",
     financialFees: "الرسوم المالية",
     invitationCost: "تكلفة الدعوة",
     lastEnquiriesAt: "آخر موعد للاستفسارات",
@@ -85,6 +99,18 @@
     winnerAwardsHalalasSum: "مجموع ترسيات الفائزين بالهللات",
     deltaHalalas: "فرق التحقق بالهللات",
     method: "منهج التحويل المالي",
+    componentDetails: "تفاصيل المكونات الرسمية",
+    flags: "الأعلام الرسمية",
+    lifecycleClassifiedAt: "وقت تصنيف دورة الحياة",
+    deadlineParsedAt: "موعد الإغلاق المفسر",
+    baselineFetchedAt: "وقت جلب خط الأساس",
+    baselineImportedAt: "وقت استيراد خط الأساس",
+    lastOfficialObservedAt: "آخر رصد رسمي",
+    datesCheckedAt: "آخر فحص للتواريخ",
+    relationsCheckedAt: "آخر فحص للعلاقات",
+    awardCheckedAt: "آخر فحص للترسية",
+    lastAttemptedAt: "آخر محاولة",
+    lastError: "آخر خطأ",
   };
 
   const SOURCE_AR = {
@@ -96,6 +122,8 @@
     etimad_plus_phase0: "اعتماد بلس — خط الأساس",
     phase0_baseline: "خط الأساس المحفوظ",
     etimad_official_periodic: "اعتماد الرسمية — الجلب الدوري",
+    etimad_official_visitor: "اعتماد الرسمية — واجهة الزائر",
+    etimad_official_components: "اعتماد الرسمية — مكونات التفاصيل",
     official_plus_merged: "دمج الرسمية مع خط الأساس",
   };
 
@@ -346,7 +374,7 @@
     const m = state.manifest;
     const obtained = m.obtained || {};
     const items = [
-      ["مفتوحة", obtained.open_tenders_complete],
+      ["مفتوحة في اللقطة", obtained.open_tenders_current_snapshot ?? obtained.open_tenders_complete],
       ["خلال 7", obtained.within_7],
       ["خلال 30", obtained.within_30],
       ["مرساة جزئية", obtained.awarded_yes_partial],
@@ -800,6 +828,11 @@
     return `<div class="detail-block"><h3>التحقق المالي</h3>${kv(pairs)}</div>`;
   }
 
+  function evidenceBlock(title, value) {
+    if (!value || typeof value !== "object" || !Object.keys(value).length) return "";
+    return `<div class="detail-block"><h3>${esc(title)}</h3>${renderArabicTree(value)}</div>`;
+  }
+
   function openDetail(row) {
     if (!row) {
       el.setMeta.textContent = "تعذر العثور على سجل التفاصيل.";
@@ -833,6 +866,10 @@
       "groups",
       "awardGroups",
       "_provenance",
+      "_freshness",
+      "_evidence",
+      "componentDetails",
+      "flags",
       "_detailShard",
       "_detailComplete",
       "_datasetSource",
@@ -856,6 +893,8 @@
     }
 
     const order = [
+      "tenderCategory",
+      "tenderCategoryBasis",
       "num",
       "agency",
       "branch",
@@ -868,6 +907,7 @@
       "offersOpeningAt",
       "days",
       "hoursLeft",
+      "deadlineWindowHours",
       "minutesLeft",
       "submit",
       "firstSeen",
@@ -884,6 +924,7 @@
       "winAmount",
       "buyingCost",
       "bookletPrice",
+      "condetionalBookletPrice",
       "financialFees",
       "invitationCost",
       "sourceKind",
@@ -943,6 +984,10 @@
     el.detailBody.innerHTML = [
       kv(pairs),
       provenanceBlock(row._provenance),
+      evidenceBlock("حداثة الحقول والمكونات", row._freshness),
+      evidenceBlock("أدلة RAW والتحقق", row._evidence),
+      evidenceBlock("تفاصيل التواريخ والعلاقات الرسمية", row.componentDetails),
+      evidenceBlock("الأعلام الرسمية", row.flags),
       moneyConsistencyBlock(row.moneyConsistency),
       groupsBlock(row.groups || row.awardGroups || []),
       bidsBlock("الفائزون", row.winners || []),

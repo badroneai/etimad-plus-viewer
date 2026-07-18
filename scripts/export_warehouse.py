@@ -9,17 +9,20 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import unicodedata
 from collections import OrderedDict, defaultdict
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 
 SCHEMA_VERSION = 2
 SHARD_COUNT = 64
+SAUDI_TIMEZONE = timezone(timedelta(hours=3))
 HERE = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = HERE / "data"
 PLUS_CANDIDATES = tuple(
@@ -52,6 +55,8 @@ INDEX_FIELDS = (
     "region",
     "activity",
     "type",
+    "status",
+    "tenderCategory",
     "deadline",
     "winAmount",
     "winAmountHalalas",
@@ -79,9 +84,179 @@ NON_TENDER_FILES = (
     "inventory.json",
 )
 
+OFFICIAL_FLAG_FIELDS = {
+    "hasInvitations",
+    "isManagedByEtimad",
+    "isLocalization",
+    "isSMEs",
+    "isPreQualification",
+    "isReverseAuction",
+    "isFrameworkAgreement",
+}
+
+AWARDED_STATUS_TERMS = (
+    "awarded",
+    "award announced",
+    "تمت الترسية",
+    "تم الترسية",
+    "مرساة",
+)
+AWARDING_STATUS_TERMS = (
+    "awarding stage",
+    "award stage",
+    "مرحلة الترسية",
+    "تحت الترسية",
+)
+CANCELLED_STATUS_TERMS = (
+    "cancelled",
+    "canceled",
+    "withdrawn",
+    "ملغ",
+    "الغيت",
+    "سحبت",
+)
+EXAMINATION_STATUS_TERMS = (
+    "closed",
+    "expired",
+    "evaluation",
+    "examination",
+    "under review",
+    "مغلق",
+    "منته",
+    "فحص",
+    "تقييم",
+    "فتح العروض",
+    "تحت المراجعة",
+)
+OPEN_STATUS_TERMS = (
+    "active",
+    "open",
+    "published",
+    "نشط",
+    "مفتوح",
+    "متاح",
+)
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def first_present(*values: Any) -> Any:
+    return next((value for value in values if value is not None), None)
+
+
+def parse_iso_datetime(value: Any, *, date_end_of_day: bool = False) -> datetime | None:
+    """Parse Etimad timestamps, treating naive values as Saudi local time.
+
+    Phase-0 sometimes stores a date without a time.  A tender whose deadline is
+    only a date remains open through the end of that Saudi calendar day.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        for pattern in ("%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    date_only = not re.search(r"[T\s]\d{1,2}:\d{2}", text)
+    if date_only and date_end_of_day:
+        parsed = datetime.combine(parsed.date(), time.max)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SAUDI_TIMEZONE)
+    return parsed.astimezone(timezone.utc)
+
+
+def canonical_iso(value: Any) -> str | None:
+    parsed = parse_iso_datetime(value)
+    return parsed.isoformat() if parsed else None
+
+
+def normalized_status(value: Any) -> str:
+    text = unicodedata.normalize("NFC", str(value or "")).lower()
+    text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def has_status_term(status: str, terms: Iterable[str]) -> bool:
+    return any(term in status for term in terms)
+
+
+def award_is_announced(record: dict[str, Any]) -> bool:
+    status = normalized_status(record.get("status"))
+    return bool(
+        record.get("awardState") == "announced"
+        or record.get("awardCompleteness")
+        in (True, "complete", "announced", "all_groups_announced")
+        or meaningful(record.get("winners"))
+        or meaningful(record.get("winAmount"))
+        or has_status_term(status, AWARDED_STATUS_TERMS)
+    )
+
+
+def classify_tender(
+    record: dict[str, Any],
+    *,
+    as_of: datetime,
+) -> tuple[str, str, datetime | None]:
+    """Return a truthful lifecycle category, its evidence basis, and deadline."""
+    status = normalized_status(record.get("status"))
+    status_id = record.get("statusId")
+    deadline = parse_iso_datetime(record.get("deadline"), date_end_of_day=True)
+    if award_is_announced(record):
+        return "awarded", "award_evidence", deadline
+    if has_status_term(status, CANCELLED_STATUS_TERMS):
+        return "cancelled", "official_status_cancelled", deadline
+    if has_status_term(status, AWARDED_STATUS_TERMS):
+        return "awarded", "official_status_awarded", deadline
+    if has_status_term(status, AWARDING_STATUS_TERMS):
+        return "awarding", "official_status_awarding_stage", deadline
+    if deadline is not None:
+        if deadline >= as_of and not has_status_term(status, EXAMINATION_STATUS_TERMS):
+            return "open", "deadline_not_elapsed", deadline
+        return "examination", "deadline_elapsed_or_terminal_status", deadline
+    if has_status_term(status, EXAMINATION_STATUS_TERMS):
+        return "examination", "official_status_terminal", None
+    if has_status_term(status, OPEN_STATUS_TERMS) or status_id in (4, "4"):
+        return "open", "official_active_status_without_deadline", None
+    return "unknown", "insufficient_lifecycle_evidence", None
+
+
+def apply_lifecycle(
+    record: dict[str, Any],
+    *,
+    as_of: datetime,
+) -> tuple[str, datetime | None]:
+    category, basis, deadline = classify_tender(record, as_of=as_of)
+    record["tenderCategory"] = category
+    record["tenderCategoryBasis"] = basis
+    freshness = record.setdefault("_freshness", {})
+    freshness["lifecycleClassifiedAt"] = as_of.isoformat()
+    if deadline is not None:
+        remaining_seconds = max(0, int((deadline - as_of).total_seconds()))
+        record["days"] = remaining_seconds // 86_400
+        record["hoursLeft"] = remaining_seconds // 3_600
+        record["deadlineWindowHours"] = remaining_seconds / 3_600
+        freshness["deadlineParsedAt"] = deadline.isoformat()
+    else:
+        record.pop("deadlineWindowHours", None)
+        if category != "open":
+            record.pop("days", None)
+            record.pop("hoursLeft", None)
+    return category, deadline
 
 
 def meaningful(value: Any) -> bool:
@@ -228,7 +403,16 @@ def add_source(
     provenance = record.setdefault("_provenance", {"sources": [], "fieldSources": {}})
     sources = provenance.setdefault("sources", [])
     key = (source_id, fetched_at, layer)
-    existing = {(s.get("id"), s.get("fetchedAt"), s.get("layer")) for s in sources}
+    existing = {
+        (
+            s.get("id"),
+            s.get("fetchedAt"),
+            s.get("layer"),
+        )
+        if isinstance(s, dict)
+        else (str(s), None, None)
+        for s in sources
+    }
     if key not in existing:
         sources.append(
             {
@@ -269,14 +453,29 @@ def official_overlay(
     result["_provenance"] = deepcopy(old_provenance)
     result["_provenance"].setdefault("sources", [])
     result["_provenance"].setdefault("fieldSources", {})
-    for source in official_provenance.get("sources", []):
+    for source_value in official_provenance.get("sources", []):
+        source = (
+            source_value
+            if isinstance(source_value, dict)
+            else {"id": str(source_value), "fetchedAt": None, "layer": None}
+        )
         marker = (source.get("id"), source.get("fetchedAt"), source.get("layer"))
         known = {
-            (item.get("id"), item.get("fetchedAt"), item.get("layer"))
+            (
+                item.get("id"),
+                item.get("fetchedAt"),
+                item.get("layer"),
+            )
+            if isinstance(item, dict)
+            else (str(item), None, None)
             for item in result["_provenance"]["sources"]
         }
         if marker not in known:
             result["_provenance"]["sources"].append(deepcopy(source))
+
+    for key in ("primary", "baselineLayer", "defaultFieldSource"):
+        if meaningful(official_provenance.get(key)):
+            result["_provenance"][key] = deepcopy(official_provenance[key])
 
     official_award_complete = official.get("awardState") == "announced" or official.get(
         "awardCompleteness"
@@ -287,7 +486,18 @@ def official_overlay(
         if key in AWARD_FIELDS and meaningful(result.get(key)) and not official_award_complete:
             continue
         result[key] = deepcopy(value)
-        result["_provenance"]["fieldSources"][key] = source_id
+        result["_provenance"]["fieldSources"][key] = (
+            official_provenance.get("fieldSources", {}).get(key) or source_id
+        )
+
+    for meta_key in ("_freshness", "_evidence"):
+        incoming = official.get(meta_key)
+        if not isinstance(incoming, dict):
+            continue
+        current = result.setdefault(meta_key, {})
+        for key, value in incoming.items():
+            if value is not None or key not in current:
+                current[key] = deepcopy(value)
 
     result["ref"] = record_ref(result) or record_ref(official)
     result["_source"] = "official_plus_merged" if base else source_id
@@ -377,6 +587,140 @@ def load_plus_tenders(root: Path) -> tuple[dict[str, dict[str, Any]], dict[str, 
     return maps, layers
 
 
+def awarded_truth_from_payload(payload: dict[str, Any] | None, *, source: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    assets = payload.get("assets")
+    awarded_asset = None
+    if isinstance(assets, dict):
+        awarded_asset = assets.get("awarded")
+    elif isinstance(assets, list):
+        awarded_asset = next(
+            (
+                item
+                for item in assets
+                if isinstance(item, dict) and item.get("state") == "awarded"
+            ),
+            None,
+        )
+    candidates = [
+        payload.get("baseline_awarded"),
+        awarded_asset,
+        payload.get("awarded"),
+        payload,
+    ]
+    item = next(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and any(
+                key in candidate
+                for key in (
+                    "source_has_more",
+                    "hasMore",
+                    "source_partial",
+                    "partial",
+                    "source_complete",
+                    "complete",
+                )
+            )
+        ),
+        None,
+    )
+    if item is None:
+        return None
+    has_more = first_present(item.get("source_has_more"), item.get("hasMore"))
+    partial = first_present(item.get("source_partial"), item.get("partial"))
+    complete = first_present(item.get("source_complete"), item.get("complete"))
+    if has_more is not None:
+        has_more = bool(has_more)
+    if partial is not None:
+        partial = bool(partial)
+    if complete is not None:
+        complete = bool(complete)
+    claims = [
+        has_more is True,
+        partial is True,
+        complete is False,
+    ]
+    complete_claims = [
+        has_more is False,
+        partial is False,
+        complete is True,
+    ]
+    if any(claims) and any(complete_claims):
+        raise RuntimeError(f"conflicting awarded completeness truth in {source}")
+    if any(claims):
+        resolved_partial = True
+    elif any(complete_claims):
+        resolved_partial = False
+    else:
+        raise RuntimeError(f"awarded completeness is not explicit in {source}")
+    source_records = first_present(
+        item.get("source_count"), item.get("records"), item.get("count")
+    )
+    if isinstance(source_records, list):
+        source_records = len(source_records)
+    return {
+        "partial": resolved_partial,
+        "sourceHasMore": has_more,
+        "sourcePartial": partial,
+        "sourceComplete": complete,
+        "sourceFetchedAt": canonical_iso(
+            first_present(item.get("source_fetched_at"), item.get("fetched_at"))
+        ),
+        "sourceRecords": source_records,
+        "basis": source,
+    }
+
+
+def resolve_awarded_truth(
+    *,
+    plus_layers: dict[str, Any],
+    database_metadata: dict[str, Any],
+    phase0_lock: dict[str, Any] | None,
+) -> dict[str, Any]:
+    truths: list[dict[str, Any]] = []
+    if plus_layers:
+        truth = awarded_truth_from_payload(
+            plus_layers.get("awarded"), source="plus_layer_81_tenders_awarded_yes"
+        )
+        if truth:
+            truths.append(truth)
+    truth = awarded_truth_from_payload(database_metadata, source="official_db_meta_baseline_awarded")
+    if truth:
+        truths.append(truth)
+    truth = awarded_truth_from_payload(phase0_lock, source="phase0_baseline_lock")
+    if truth:
+        truths.append(truth)
+    if not truths:
+        raise RuntimeError(
+            "awarded completeness has no trusted proof; provide --phase0-lock or hydrated DB meta"
+        )
+    expected = truths[0]
+    for candidate in truths[1:]:
+        for field in (
+            "partial",
+            "sourceHasMore",
+            "sourcePartial",
+            "sourceComplete",
+            "sourceFetchedAt",
+            "sourceRecords",
+        ):
+            left = expected.get(field)
+            right = candidate.get(field)
+            if left is not None and right is not None and left != right:
+                raise RuntimeError(
+                    "awarded completeness sources disagree: "
+                    f"{expected['basis']} vs {candidate['basis']} on {field}"
+                )
+    return {
+        **expected,
+        "validatedBy": [truth["basis"] for truth in truths],
+    }
+
+
 def parse_json_cell(value: Any) -> dict[str, Any] | None:
     if not value:
         return None
@@ -387,6 +731,17 @@ def parse_json_cell(value: Any) -> dict[str, Any] | None:
     except (TypeError, json.JSONDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def parse_json_value(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (dict, list, int, float, bool)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def official_payload_fields(payload: dict[str, Any]) -> dict[str, Any]:
@@ -453,19 +808,297 @@ def table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
-def database_times(connection: sqlite3.Connection) -> dict[str, str | None]:
-    result: dict[str, str | None] = {"official": None, "phase0": None}
-    try:
-        result["official"] = connection.execute("SELECT MAX(last_seen_at) FROM tenders").fetchone()[0]
-    except sqlite3.Error:
-        pass
-    try:
+def database_meta(connection: sqlite3.Connection) -> dict[str, Any]:
+    if not table_columns(connection, "meta"):
+        return {}
+    result: dict[str, Any] = {}
+    for key, value in connection.execute("SELECT key,value FROM meta"):
+        parsed = parse_json_value(value)
+        result[str(key)] = parsed if parsed is not None else value
+    return result
+
+
+def database_times(connection: sqlite3.Connection) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "official": None,
+        "phase0": None,
+        "phase0_open": None,
+        "phase0_awarded": None,
+        "phase0_basis": None,
+        "meta": database_meta(connection),
+    }
+    tender_columns = table_columns(connection, "tenders")
+    official_conditions: list[str] = []
+    if "official_json" in tender_columns:
+        official_conditions.append(
+            "(official_json IS NOT NULL AND TRIM(official_json) NOT IN ('','{}'))"
+        )
+    if "source_kind" in tender_columns:
+        official_conditions.append("LOWER(COALESCE(source_kind,'')) LIKE 'official%'")
+    if "last_seen_at" in tender_columns and official_conditions:
+        result["official"] = connection.execute(
+            "SELECT MAX(last_seen_at) FROM tenders WHERE "
+            + " OR ".join(official_conditions)
+        ).fetchone()[0]
+    baseline_columns = table_columns(connection, "baseline_tenders")
+    if "source_fetched_at" in baseline_columns:
+        result["phase0"] = connection.execute(
+            "SELECT MAX(COALESCE(source_fetched_at,imported_at)) FROM baseline_tenders"
+        ).fetchone()[0]
+        result["phase0_basis"] = "source_fetched_at_with_null_import_fallback"
+        for state in ("open", "awarded"):
+            result[f"phase0_{state}"] = connection.execute(
+                "SELECT MAX(COALESCE(source_fetched_at,imported_at)) "
+                "FROM baseline_tenders WHERE seed_state=?",
+                (state,),
+            ).fetchone()[0]
+    elif "imported_at" in baseline_columns:
         result["phase0"] = connection.execute(
             "SELECT MAX(imported_at) FROM baseline_tenders"
         ).fetchone()[0]
-    except sqlite3.Error:
-        pass
+        result["phase0_basis"] = "imported_at_legacy_schema_fallback"
+        for state in ("open", "awarded"):
+            result[f"phase0_{state}"] = connection.execute(
+                "SELECT MAX(imported_at) FROM baseline_tenders WHERE seed_state=?",
+                (state,),
+            ).fetchone()[0]
     return result
+
+
+def official_projection_record(
+    raw: dict[str, Any],
+    *,
+    baseline_info: dict[str, Any] | None,
+    component_rows: dict[str, dict[str, Any]],
+    groups: list[dict[str, Any]],
+    latest_version: dict[str, Any] | None,
+    raw_sha_by_path: dict[str, str],
+) -> dict[str, Any]:
+    """Mirror the official warehouse export contract without importing its repo."""
+    baseline_info = baseline_info or {}
+    official_payload = parse_json_cell(raw.get("official_json")) or {}
+    seed = (
+        parse_json_cell(raw.get("seed_json"))
+        or parse_json_cell(baseline_info.get("record_json"))
+        or {}
+    )
+    dates = component_rows.get("dates") or {}
+    relations = component_rows.get("relations") or {}
+    awards = component_rows.get("awards") or {}
+    award_payload = parse_json_cell(raw.get("award_json")) or {}
+    official_observed = bool(official_payload)
+    baseline_source_fetched_at = baseline_info.get("source_fetched_at")
+    baseline_fetched_at = first_present(
+        baseline_source_fetched_at, baseline_info.get("imported_at")
+    )
+    baseline_layer = baseline_info.get("source_layer")
+
+    def component_success_at(row: dict[str, Any]) -> Any:
+        if not row:
+            return None
+        if "success_checked_at" in row:
+            return row.get("success_checked_at")
+        return row.get("checked_at") if not row.get("error") else None
+
+    component_details = {
+        component: parsed
+        for component, row in (("dates", dates), ("relations", relations))
+        if component_success_at(row)
+        if (parsed := parse_json_value(row.get("parsed_json"))) is not None
+    }
+    flags = {
+        key: value
+        for key, value in sorted(official_payload.items())
+        if isinstance(value, bool)
+        or key in OFFICIAL_FLAG_FIELDS
+        and value is not None
+    }
+    field_sources = {
+        field: (
+            "etimad_official_visitor"
+            if official_payload.get(official_key) is not None
+            else "phase0_baseline"
+        )
+        for field, official_key in {
+            "name": "tenderName",
+            "num": "tenderNumber",
+            "agency": "agencyName",
+            "branch": "branchName",
+            "type": "tenderTypeName",
+            "activity": "tenderActivityName",
+            "deadline": "lastOfferPresentationDate",
+            "status": "tenderStatusName",
+        }.items()
+    }
+    sources: list[dict[str, Any]] = []
+    if official_observed:
+        sources.append(
+            {
+                "id": "etimad_official_visitor",
+                "fetchedAt": raw.get("last_seen_at"),
+                "layer": "official_periodic.sqlite3:tenders",
+            }
+        )
+    component_checked_at = max(
+        filter(
+            None,
+            (
+                component_success_at(dates),
+                component_success_at(relations),
+                component_success_at(awards),
+            ),
+        ),
+        default=None,
+    )
+    if dates or relations or awards:
+        sources.append(
+            {
+                "id": "etimad_official_components",
+                "fetchedAt": component_checked_at,
+                "layer": "official_periodic.sqlite3:components",
+            }
+        )
+        if component_details:
+            field_sources["componentDetails"] = "etimad_official_components"
+    if raw.get("baseline_linked") or baseline_info:
+        sources.append(
+            {
+                "id": "phase0_baseline",
+                "fetchedAt": baseline_fetched_at,
+                "layer": baseline_layer,
+            }
+        )
+
+    list_raw_path = (latest_version or {}).get("raw_path")
+    record: dict[str, Any] = {
+        "name": official_payload.get("tenderName") or raw.get("tender_name") or seed.get("name"),
+        "url": raw.get("official_url") or seed.get("url"),
+        "num": official_payload.get("tenderNumber") or raw.get("tender_number") or seed.get("num"),
+        "ref": str(raw["reference_number"]),
+        "agency": official_payload.get("agencyName") or raw.get("agency_name") or seed.get("agency"),
+        "branch": official_payload.get("branchName") or raw.get("branch_name") or seed.get("branch"),
+        "type": official_payload.get("tenderTypeName") or raw.get("tender_type_name") or seed.get("type"),
+        "activity": official_payload.get("tenderActivityName") or raw.get("activity_name") or seed.get("activity"),
+        "region": raw.get("region") or seed.get("region"),
+        "deadline": first_present(
+            official_payload.get("lastOfferPresentationDate"),
+            raw.get("deadline"),
+            seed.get("deadline"),
+        ),
+        "deadlineHijri": first_present(
+            official_payload.get("lastOfferPresentationDateHijri"),
+            official_payload.get("lastOfferPresentationHijriDate"),
+            seed.get("deadlineHijri"),
+        ),
+        "expectedAwardAt": raw.get("expected_award_at"),
+        "submit": raw.get("submitted_at"),
+        "status": official_payload.get("tenderStatusName") or raw.get("tender_status_name") or seed.get("status"),
+        "statusId": first_present(official_payload.get("tenderStatusId"), raw.get("tender_status_id")),
+        "tenderTypeId": first_present(official_payload.get("tenderTypeId"), raw.get("tender_type_id")),
+        "activityId": first_present(official_payload.get("tenderActivityId"), raw.get("activity_id")),
+        "days": official_payload.get("remainingDays"),
+        "hoursLeft": official_payload.get("remainingHours"),
+        "minutesLeft": official_payload.get("remainingMins"),
+        "buyingCost": first_present(official_payload.get("buyingCost"), seed.get("buyingCost")),
+        "condetionalBookletPrice": first_present(
+            official_payload.get("condetionalBookletPrice"),
+            seed.get("condetionalBookletPrice"),
+            seed.get("bookletPrice"),
+        ),
+        "financialFees": first_present(official_payload.get("financialFees"), seed.get("financialFees")),
+        "invitationCost": first_present(official_payload.get("invitationCost"), seed.get("invitationCost")),
+        "lastEnqueriesDate": first_present(
+            official_payload.get("lastEnqueriesDate"), seed.get("lastEnqueriesDate")
+        ),
+        "lastEnqueriesDateHijri": first_present(
+            official_payload.get("lastEnqueriesDateHijri"), seed.get("lastEnqueriesDateHijri")
+        ),
+        "offersOpeningDate": first_present(
+            official_payload.get("offersOpeningDate"), seed.get("offersOpeningDate")
+        ),
+        "offersOpeningDateHijri": first_present(
+            official_payload.get("offersOpeningDateHijri"), seed.get("offersOpeningDateHijri")
+        ),
+        "flags": flags,
+        "componentDetails": component_details,
+        "firstSeen": raw.get("first_seen_at"),
+        "lastSeen": raw.get("last_seen_at"),
+        "officialTenderId": raw.get("official_tender_id"),
+        "officialTenderIdString": raw.get("tender_id_string"),
+        "source": "etimad_official_periodic",
+        "sourceKind": raw.get("source_kind"),
+        "baselineLinked": bool(raw.get("baseline_linked")),
+        "awardState": raw.get("award_state"),
+        "awardMode": raw.get("award_mode"),
+        "lastAwardCheckedAt": raw.get("last_award_checked_at"),
+        "nextAwardCheckAt": raw.get("next_award_check_at"),
+        "_source": "etimad_official_periodic",
+        "_provenance": {
+            "primary": (
+                "etimad_official_visitor" if official_observed else "phase0_baseline"
+            ),
+            "sources": sources,
+            "baselineLayer": baseline_layer,
+            "fieldSources": field_sources,
+            "defaultFieldSource": (
+                "etimad_official_visitor" if official_observed else "phase0_baseline"
+            ),
+        },
+        "_freshness": {
+            "firstObservedAt": raw.get("first_seen_at"),
+            "lastOfficialObservedAt": raw.get("last_seen_at") if official_observed else None,
+            "baselineFetchedAt": baseline_fetched_at,
+            "baselineSourceFetchedAt": baseline_source_fetched_at,
+            "baselineImportedAt": baseline_info.get("imported_at"),
+            "datesCheckedAt": component_success_at(dates),
+            "relationsCheckedAt": component_success_at(relations),
+            "awardCheckedAt": raw.get("last_award_checked_at"),
+        },
+        "_evidence": {
+            "list": {
+                "rawPath": list_raw_path,
+                "sha256": raw_sha_by_path.get(str(list_raw_path)) if list_raw_path else None,
+                "payloadHash": raw.get("stable_hash"),
+            },
+            "dates": {
+                "rawPath": dates.get("raw_path"),
+                "sha256": dates.get("sha256"),
+                "parserVersion": dates.get("parser_version"),
+                "lastAttemptedAt": dates.get("checked_at"),
+                "lastError": dates.get("error"),
+            },
+            "relations": {
+                "rawPath": relations.get("raw_path"),
+                "sha256": relations.get("sha256"),
+                "parserVersion": relations.get("parser_version"),
+                "lastAttemptedAt": relations.get("checked_at"),
+                "lastError": relations.get("error"),
+            },
+            "awards": {
+                "rawPath": awards.get("raw_path"),
+                "sha256": awards.get("sha256"),
+                "parserVersion": awards.get("parser_version"),
+                "lastAttemptedAt": awards.get("checked_at"),
+                "lastError": awards.get("error"),
+            },
+        },
+    }
+    record.update(award_fields(award_payload))
+    award_groups = award_payload.get("groups") or groups
+    if award_groups:
+        record["groups"] = deepcopy(award_groups)
+        record["groupCount"] = len(award_groups)
+        record["pendingGroupCount"] = sum(
+            1
+            for group in award_groups
+            if not group.get("announced") and not group.get("complete")
+        )
+    if award_payload:
+        record["awardComplete"] = bool(award_payload.get("complete", True))
+        record["allGroupsAnnounced"] = bool(
+            award_payload.get("allGroupsAnnounced", award_payload.get("announced"))
+        )
+    return record
 
 
 def load_official_database(
@@ -473,7 +1106,7 @@ def load_official_database(
 ) -> tuple[
     dict[str, OrderedDict[str, dict[str, Any]]],
     OrderedDict[str, dict[str, Any]],
-    dict[str, str | None],
+    dict[str, Any],
 ]:
     """Read Phase-0 record_json and current official overlays from one SQLite DB."""
     uri = f"file:{path.resolve()}?mode=ro"
@@ -486,30 +1119,75 @@ def load_official_database(
     official: OrderedDict[str, dict[str, Any]] = OrderedDict()
     try:
         baseline_columns = table_columns(connection, "baseline_tenders")
-        baseline_count = connection.execute("SELECT COUNT(*) FROM baseline_tenders").fetchone()[0]
+        baseline_count = (
+            connection.execute("SELECT COUNT(*) FROM baseline_tenders").fetchone()[0]
+            if baseline_columns
+            else 0
+        )
+        baseline_info: dict[str, dict[str, Any]] = {}
         if "record_json" in baseline_columns:
+            fetched_expression = (
+                "source_fetched_at"
+                if "source_fetched_at" in baseline_columns
+                else "NULL AS source_fetched_at"
+            )
             rows = connection.execute(
-                "SELECT reference_number, seed_state, source_layer, imported_at, record_json "
-                "FROM baseline_tenders ORDER BY rowid"
+                "SELECT reference_number,seed_state,source_layer,imported_at,record_json,"
+                + fetched_expression
+                + " FROM baseline_tenders ORDER BY rowid"
             )
             for row in rows:
                 payload = parse_json_cell(row["record_json"])
                 if not payload:
                     continue
+                info = dict(row)
+                baseline_info[str(row["reference_number"])] = info
                 state = "awarded" if row["seed_state"] == "awarded" else "open"
+                if (
+                    "source_fetched_at" in baseline_columns
+                    and row["source_fetched_at"] is not None
+                ):
+                    freshness_basis = "source_fetched_at"
+                    fetched_at = row["source_fetched_at"]
+                else:
+                    freshness_basis = "imported_at_null_or_legacy_fallback"
+                    fetched_at = row["imported_at"]
                 record = seed_record(
                     payload,
                     source_id="phase0_baseline",
-                    fetched_at=row["imported_at"],
+                    fetched_at=fetched_at,
                     layer=row["source_layer"],
                 )
                 record["ref"] = str(row["reference_number"])
+                record["_freshness"] = {
+                    "baselineFetchedAt": fetched_at,
+                    "baselineSourceFetchedAt": row["source_fetched_at"],
+                    "baselineImportedAt": row["imported_at"],
+                    "baselineFreshnessBasis": freshness_basis,
+                }
                 baseline[state][record["ref"]] = record
         loaded_baseline = sum(len(values) for values in baseline.values())
         if baseline_count and loaded_baseline not in (0, baseline_count):
             raise RuntimeError(
                 f"baseline record_json incomplete: loaded {loaded_baseline}/{baseline_count}"
             )
+
+        components: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        if table_columns(connection, "components"):
+            for row in connection.execute("SELECT * FROM components"):
+                value = dict(row)
+                components[str(value["reference_number"])][str(value["component"])] = value
+
+        latest_versions: dict[str, dict[str, Any]] = {}
+        if table_columns(connection, "tender_versions"):
+            for row in connection.execute("SELECT * FROM tender_versions ORDER BY id"):
+                value = dict(row)
+                latest_versions[str(value["reference_number"])] = value
+
+        raw_sha_by_path: dict[str, str] = {}
+        if table_columns(connection, "raw_manifest"):
+            for row in connection.execute("SELECT raw_path,sha256 FROM raw_manifest"):
+                raw_sha_by_path[str(row["raw_path"])] = str(row["sha256"])
 
         tender_columns = table_columns(connection, "tenders")
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -535,52 +1213,13 @@ def load_official_database(
             for row in connection.execute("SELECT * FROM tenders ORDER BY rowid"):
                 raw = dict(row)
                 ref = str(raw["reference_number"])
-                seed = parse_json_cell(raw.get("seed_json")) or {}
-                payload = parse_json_cell(raw.get("official_json")) or {}
-                record = seed_record(
-                    seed,
-                    source_id="etimad_official_periodic",
-                    fetched_at=raw.get("last_seen_at"),
-                    layer="tenders.seed_json",
-                )
-                curated = {
-                    "ref": ref,
-                    "officialTenderId": raw.get("official_tender_id"),
-                    "officialTenderIdString": raw.get("tender_id_string"),
-                    "name": raw.get("tender_name"),
-                    "num": raw.get("tender_number"),
-                    "agency": raw.get("agency_name"),
-                    "branch": raw.get("branch_name"),
-                    "type": raw.get("tender_type_name"),
-                    "status": raw.get("tender_status_name"),
-                    "activity": raw.get("activity_name"),
-                    "submit": raw.get("submitted_at"),
-                    "deadline": raw.get("deadline"),
-                    "url": raw.get("official_url"),
-                    "region": raw.get("region"),
-                    "expectedAwardAt": raw.get("expected_award_at"),
-                    "awardMode": raw.get("award_mode"),
-                    "awardState": raw.get("award_state"),
-                    "firstSeen": raw.get("first_seen_at"),
-                    "lastSeen": raw.get("last_seen_at"),
-                    "lastAwardCheckedAt": raw.get("last_award_checked_at"),
-                    "nextAwardCheckAt": raw.get("next_award_check_at"),
-                    "sourceKind": raw.get("source_kind"),
-                    "baselineLinked": bool(raw.get("baseline_linked")),
-                }
-                curated.update(official_payload_fields(payload))
-                curated.update(award_fields(parse_json_cell(raw.get("award_json"))))
-                if groups.get(ref):
-                    curated["groups"] = groups[ref]
-                    curated.setdefault(
-                        "awardCompleteness",
-                        all(bool(group.get("complete")) for group in groups[ref]),
-                    )
-                official_record = seed_record(
-                    curated,
-                    source_id="etimad_official_periodic",
-                    fetched_at=raw.get("last_seen_at"),
-                    layer="official_periodic.sqlite3:tenders",
+                official_record = official_projection_record(
+                    raw,
+                    baseline_info=baseline_info.get(ref),
+                    component_rows=components.get(ref, {}),
+                    groups=groups.get(ref, []),
+                    latest_version=latest_versions.get(ref),
+                    raw_sha_by_path=raw_sha_by_path,
                 )
                 official[ref] = official_record
         return baseline, official, database_times(connection)
@@ -803,9 +1442,13 @@ def retain_catalogue(out: Path, assets: dict[str, dict[str, Any]]) -> tuple[dict
 
 def build_datasets(out: Path, awarded_partial: bool) -> list[dict[str, Any]]:
     definitions = [
-        ("open", "open.json", "منافسات مفتوحة", "tenders", False),
-        ("within_7", "within_7.json", "خلال 7 أيام", "tenders", False),
-        ("within_30", "within_30.json", "خلال 30 يوماً", "tenders", False),
+        ("open", "open.json", "منافسات مفتوحة ضمن التغطية", "tenders", True),
+        ("within_7", "within_7.json", "خلال 7 أيام ضمن التغطية", "tenders", True),
+        ("within_30", "within_30.json", "خلال 30 يوماً ضمن التغطية", "tenders", True),
+        ("awarding", "awarding.json", "في مرحلة الترسية ضمن التغطية", "tenders", True),
+        ("examination", "examination.json", "تحت الفحص أو مغلقة ضمن التغطية", "tenders", True),
+        ("cancelled", "cancelled.json", "منافسات ملغاة ضمن التغطية", "tenders", True),
+        ("unknown", "unknown.json", "حالة دورة الحياة غير معروفة ضمن التغطية", "tenders", True),
         ("awarded", "awarded_index.json", "مرساة" + (" (جزئي)" if awarded_partial else ""), "tenders", awarded_partial),
         ("winnerfacet", "winnerfacet.json", "فائزون (winnerfacet)", "entities", True),
         ("ssr_tenders", "ssr_tenders.json", "عيّنة SSR للمنافسات", "tenders", False),
@@ -850,7 +1493,18 @@ def build_datasets(out: Path, awarded_partial: bool) -> list[dict[str, Any]]:
 def build(args: argparse.Namespace) -> dict[str, Any]:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    plus_root = None if args.no_plus else find_plus_root(args.plus_warehouse)
+    no_plus = bool(getattr(args, "no_plus", False))
+    phase0_lock_path = getattr(args, "phase0_lock", None)
+    if no_plus and phase0_lock_path is None:
+        raise RuntimeError("--no-plus requires --phase0-lock for awarded completeness truth")
+    phase0_lock = load_json(phase0_lock_path) if phase0_lock_path else None
+    if phase0_lock is not None and not isinstance(phase0_lock, dict):
+        raise RuntimeError("Phase-0 lock must contain a JSON object")
+    plus_root = (
+        None
+        if no_plus
+        else find_plus_root(getattr(args, "plus_warehouse", None))
+    )
 
     plus_maps: dict[str, OrderedDict[str, dict[str, Any]]] = {
         "open": OrderedDict(),
@@ -868,16 +1522,24 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     }
     official: OrderedDict[str, dict[str, Any]] = OrderedDict()
     source_times: dict[str, str | None] = {}
-    if args.official_db:
-        baseline_maps, official, db_times = load_official_database(args.official_db)
+    database_metadata: dict[str, Any] = {}
+    phase0_freshness_basis: str | None = None
+    official_db = getattr(args, "official_db", None)
+    if official_db:
+        baseline_maps, official, db_times = load_official_database(official_db)
+        database_metadata = db_times.get("meta") or {}
+        phase0_freshness_basis = db_times.get("phase0_basis")
         source_times.update(
             {
                 "phase0Baseline": db_times.get("phase0"),
+                "phase0Open": db_times.get("phase0_open"),
+                "phase0Awarded": db_times.get("phase0_awarded"),
                 "officialPeriodic": db_times.get("official"),
             }
         )
-    if args.official_layers:
-        layer_overlays, layer_times = load_official_layers(args.official_layers)
+    official_layers = getattr(args, "official_layers", None)
+    if official_layers:
+        layer_overlays, layer_times = load_official_layers(official_layers)
         for ref, record in layer_overlays.items():
             official[ref] = official_overlay(official.get(ref), record)
         source_times["officialPeriodic"] = max(
@@ -897,38 +1559,68 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         source_times["phase0Open"] = plus_layers["open"].get("fetched_at")
         source_times["phase0Awarded"] = plus_layers["awarded"].get("fetched_at")
 
-    open_map = merge_source_maps(plus_maps["open"], official)
-    for ref in list(open_map):
-        if open_map[ref].get("awardState") == "announced":
-            del open_map[ref]
+    awarded_truth = resolve_awarded_truth(
+        plus_layers=plus_layers,
+        database_metadata=database_metadata,
+        phase0_lock=phase0_lock,
+    )
+    awarded_partial = bool(awarded_truth["partial"])
+
+    as_of_value = getattr(args, "as_of", None) or source_times.get("officialPeriodic")
+    if not as_of_value:
+        as_of_value = max(
+            (value for value in source_times.values() if value),
+            default=None,
+        )
+    as_of = parse_iso_datetime(as_of_value) if as_of_value else None
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    as_of_iso = as_of.isoformat()
+
+    lifecycle_candidates = merge_source_maps(plus_maps["open"], official)
+    lifecycle_maps: dict[str, OrderedDict[str, dict[str, Any]]] = {
+        "open": OrderedDict(),
+        "awarding": OrderedDict(),
+        "examination": OrderedDict(),
+        "cancelled": OrderedDict(),
+        "unknown": OrderedDict(),
+    }
+    for ref, record in lifecycle_candidates.items():
+        category, _ = apply_lifecycle(record, as_of=as_of)
+        if category in lifecycle_maps:
+            lifecycle_maps[category][ref] = record
+    open_map = lifecycle_maps["open"]
 
     awarded_official = OrderedDict(
         (ref, record)
         for ref, record in official.items()
-        if record.get("awardState") == "announced"
-        or meaningful(record.get("winners"))
-        or meaningful(record.get("winAmount"))
+        if award_is_announced(record)
     )
     awarded_map = merge_source_maps(plus_maps["awarded"], awarded_official)
     for record in awarded_map.values():
+        record["tenderCategory"] = "awarded"
+        record["tenderCategoryBasis"] = "phase0_or_official_award_evidence"
         add_money_projection(record)
 
-    if plus_maps["within_7"]:
-        within_7 = overlay_existing(plus_maps["within_7"], official)
-    else:
-        within_7 = OrderedDict()
-    if plus_maps["within_30"]:
-        within_30 = overlay_existing(plus_maps["within_30"], official)
-    else:
-        within_30 = OrderedDict()
+    within_7: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    within_30: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for ref, record in open_map.items():
-        days = record.get("days")
-        if isinstance(days, (int, float)) and 0 <= days <= 7:
-            within_7.setdefault(ref, deepcopy(record))
-        if isinstance(days, (int, float)) and 0 <= days <= 30:
-            within_30.setdefault(ref, deepcopy(record))
+        hours = record.get("deadlineWindowHours")
+        if not isinstance(hours, (int, float)):
+            continue
+        if 0 <= hours <= 7 * 24:
+            within_7[ref] = deepcopy(record)
+        if 0 <= hours <= 30 * 24:
+            within_30[ref] = deepcopy(record)
 
-    all_records = list(open_map.values()) + list(awarded_map.values())
+    all_records = (
+        list(open_map.values())
+        + list(lifecycle_maps["awarding"].values())
+        + list(lifecycle_maps["examination"].values())
+        + list(lifecycle_maps["cancelled"].values())
+        + list(lifecycle_maps["unknown"].values())
+        + list(awarded_map.values())
+    )
     apply_name_cache(all_records, out)
     generated_at = utcnow()
     assets: dict[str, dict[str, Any]] = {}
@@ -937,17 +1629,54 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "open.json": pack(
             list(open_map.values()),
             dataset="open",
-            partial=False,
+            partial=True,
+            asOf=as_of_iso,
+            coverageComplete=False,
         ),
         "within_7.json": pack(
             list(within_7.values()),
             dataset="within_7",
-            partial=False,
+            partial=True,
+            asOf=as_of_iso,
+            derivedFrom="deadline",
+            coverageComplete=False,
         ),
         "within_30.json": pack(
             list(within_30.values()),
             dataset="within_30",
-            partial=False,
+            partial=True,
+            asOf=as_of_iso,
+            derivedFrom="deadline",
+            coverageComplete=False,
+        ),
+        "awarding.json": pack(
+            list(lifecycle_maps["awarding"].values()),
+            dataset="awarding",
+            partial=True,
+            asOf=as_of_iso,
+            coverageComplete=False,
+        ),
+        "examination.json": pack(
+            list(lifecycle_maps["examination"].values()),
+            dataset="examination",
+            partial=True,
+            asOf=as_of_iso,
+            coverageComplete=False,
+        ),
+        "cancelled.json": pack(
+            list(lifecycle_maps["cancelled"].values()),
+            dataset="cancelled",
+            partial=True,
+            asOf=as_of_iso,
+            coverageComplete=False,
+        ),
+        "unknown.json": pack(
+            list(lifecycle_maps["unknown"].values()),
+            dataset="unknown",
+            partial=True,
+            asOf=as_of_iso,
+            explicitUnknown=True,
+            coverageComplete=False,
         ),
     }
     for filename, payload in tender_payloads.items():
@@ -959,18 +1688,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             role="tender_dataset",
         )
 
-    awarded_partial = False
-    if plus_layers:
-        awarded_layer = plus_layers["awarded"]
-        awarded_partial = bool(awarded_layer.get("hasMore")) or not bool(
-            awarded_layer.get("complete")
-        )
     index_records = [searchable_award(record) for record in awarded_map.values()]
     index_payload = pack(
         index_records,
         dataset="awarded",
         partial=awarded_partial,
         detailShards=SHARD_COUNT,
+        completenessBasis=awarded_truth["validatedBy"],
     )
     assets["awarded_index.json"] = write_asset(
         out,
@@ -1019,12 +1743,72 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if old_awarded.exists():
         old_awarded.unlink()
 
-    datasets = build_datasets(out, awarded_partial)
     obtained = dict(fetch_status.get("obtained") or {})
-    obtained["open_tenders_complete"] = len(open_map)
+    obtained.pop("open_tenders_complete", None)
+    obtained.pop("awarded_yes_complete", None)
+    obtained.pop("awarded_yes_partial", None)
+    obtained["open_tenders_current_snapshot"] = len(open_map)
+    obtained["within_7"] = len(within_7)
+    obtained["within_30"] = len(within_30)
     obtained["awarded_yes_partial" if awarded_partial else "awarded_yes_complete"] = len(
         awarded_map
     )
+
+    lifecycle_counts = {
+        "open": len(open_map),
+        "within7": len(within_7),
+        "within30": len(within_30),
+        "awarding": len(lifecycle_maps["awarding"]),
+        "examination": len(lifecycle_maps["examination"]),
+        "cancelled": len(lifecycle_maps["cancelled"]),
+        "unknown": len(lifecycle_maps["unknown"]),
+        "awarded": len(awarded_map),
+    }
+    completeness = {
+        "officialUniverseComplete": False,
+        "phase0Awarded": awarded_truth,
+        "phase0FreshnessBasis": phase0_freshness_basis,
+    }
+    canonical_status = deepcopy(fetch_status)
+    canonical_status["updated_at"] = as_of_iso
+    canonical_status["obtained"] = obtained
+    canonical_status["canonical_projection"] = {
+        "schemaVersion": SCHEMA_VERSION,
+        "asOf": as_of_iso,
+        "sourceTimes": source_times,
+        "completeness": completeness,
+        "lifecycle": lifecycle_counts,
+        "temporalWindows": {
+            "basis": "parsed_deadline_relative_to_asOf",
+            "unknownDeadlineExcluded": True,
+        },
+    }
+    still_missing = dict(canonical_status.get("still_missing") or {})
+    still_missing.update(
+        {
+            "official_universe_backfill": {
+                "complete": False,
+                "required": "status/date partitioned official backfill",
+            },
+            "active_refresh_sweep": {
+                "complete": False,
+                "required": "resumable official active-tender sweep",
+            },
+            "entity_alias_registry": {
+                "complete": False,
+                "required": "versioned agency/company aliases and merges",
+            },
+        }
+    )
+    canonical_status["still_missing"] = still_missing
+    fetch_status = canonical_status
+    assets["fetch_status.json"] = write_asset(
+        out,
+        "fetch_status.json",
+        fetch_status,
+        role="fetch_status",
+    )
+    datasets = build_datasets(out, awarded_partial)
 
     snapshot_input = {
         "schemaVersion": SCHEMA_VERSION,
@@ -1037,6 +1821,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "snapshot_id": snapshot_id,
         "generated_at": generated_at,
+        "as_of": as_of_iso,
         "source_times": source_times,
         "source": "Kashaf canonical merge: official Etimad periodic + Phase-0 baseline",
         "note": "البيانات الرسمية الأحدث تتقدم في الحقول غير الفارغة، مع حفظ تاريخ وعروض وترسيات خط الأساس.",
@@ -1057,6 +1842,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "active": facets.get("active"),
             "soon": facets.get("soon"),
         },
+        "completeness": completeness,
+        "lifecycle": lifecycle_counts,
         "obtained": obtained,
         "still_missing": fetch_status.get("still_missing") or {},
         "datasets": datasets,
@@ -1080,7 +1867,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-plus",
         action="store_true",
-        help="disable local Plus auto-detection and prove the DB-only path",
+        help="disable local Plus auto-detection; requires --phase0-lock",
+    )
+    parser.add_argument(
+        "--phase0-lock",
+        type=Path,
+        help="trusted PHASE0_BASELINE.lock.json used to validate completeness truth",
     )
     parser.add_argument(
         "--official-db",
@@ -1096,6 +1888,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--snapshot-id",
         help="explicit deployment identity, e.g. run_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}",
+    )
+    parser.add_argument(
+        "--as-of",
+        help="ISO snapshot time for lifecycle/deadline classification; defaults to source time",
     )
     return parser.parse_args()
 
