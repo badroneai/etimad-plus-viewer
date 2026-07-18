@@ -107,6 +107,23 @@ OFFICIAL_FLAG_FIELDS = {
     "isFrameworkAgreement",
 }
 
+OFFICIAL_COMPONENT_SOURCE_ID = "etimad_official_components"
+OFFICIAL_REGION_LABELS = (
+    "منطقة الرياض",
+    "منطقة مكة المكرمة",
+    "منطقة المدينة المنورة",
+    "منطقة القصيم",
+    "المنطقة الشرقية",
+    "منطقة عسير",
+    "منطقة تبوك",
+    "منطقة حائل",
+    "منطقة الحدود الشمالية",
+    "منطقة جازان",
+    "منطقة نجران",
+    "منطقة الباحة",
+    "منطقة الجوف",
+)
+
 AWARDED_STATUS_TERMS = (
     "awarded",
     "award announced",
@@ -885,6 +902,22 @@ def database_meta(connection: sqlite3.Connection) -> dict[str, Any]:
     return result
 
 
+def official_progress_metadata(
+    metadata: dict[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    """Copy official progress as-is while making legacy DB absence explicit."""
+    if key not in metadata:
+        return {
+            "available": False,
+            "reason": "official_database_metadata_absent",
+        }
+    value = metadata[key]
+    if not isinstance(value, dict):
+        raise RuntimeError(f"official database meta {key!r} must be a JSON object")
+    return deepcopy(value)
+
+
 def database_times(connection: sqlite3.Connection) -> dict[str, Any]:
     result: dict[str, Any] = {
         "official": None,
@@ -932,6 +965,73 @@ def database_times(connection: sqlite3.Connection) -> dict[str, Any]:
     return result
 
 
+def component_success_at(row: dict[str, Any]) -> Any:
+    """Return the last verified-success timestamp, including legacy schemas."""
+    if not row:
+        return None
+    if "success_checked_at" in row:
+        return row.get("success_checked_at")
+    return row.get("checked_at") if not row.get("error") else None
+
+
+def canonical_official_region(value: Any) -> str | None:
+    """Accept only the 13 official parser labels, joined by an Arabic comma."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    labels = [label.strip() for label in text.split("،")]
+    if not labels or any(label not in OFFICIAL_REGION_LABELS for label in labels):
+        return None
+    return "، ".join(labels)
+
+
+def official_relations_region_overlay(
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project an evidence-backed official region from one successful relation row."""
+    success_checked_at = component_success_at(row)
+    parsed = parse_json_value(row.get("parsed_json"))
+    if not success_checked_at or not isinstance(parsed, dict):
+        return None
+    region = canonical_official_region(parsed.get("region"))
+    raw_path = str(row.get("raw_path") or "").strip()
+    sha256 = str(row.get("sha256") or "").strip()
+    parser_version = row.get("parser_version")
+    if (
+        region is None
+        or not raw_path
+        or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None
+        or not isinstance(parser_version, int)
+        or isinstance(parser_version, bool)
+    ):
+        return None
+    if parser_version < 1:
+        return None
+    return {
+        "region": region,
+        "_provenance": {
+            "sources": [
+                {
+                    "id": OFFICIAL_COMPONENT_SOURCE_ID,
+                    "fetchedAt": success_checked_at,
+                    "layer": "official_periodic.sqlite3:components",
+                }
+            ],
+            "fieldSources": {"region": OFFICIAL_COMPONENT_SOURCE_ID},
+        },
+        "_freshness": {"relationsCheckedAt": success_checked_at},
+        "_evidence": {
+            "relations": {
+                "rawPath": raw_path,
+                "sha256": sha256,
+                "parserVersion": parser_version,
+                "lastAttemptedAt": row.get("checked_at"),
+                "lastError": row.get("error"),
+            }
+        },
+    }
+
+
 def official_projection_record(
     raw: dict[str, Any],
     *,
@@ -959,13 +1059,6 @@ def official_projection_record(
         baseline_source_fetched_at, baseline_info.get("imported_at")
     )
     baseline_layer = baseline_info.get("source_layer")
-
-    def component_success_at(row: dict[str, Any]) -> Any:
-        if not row:
-            return None
-        if "success_checked_at" in row:
-            return row.get("success_checked_at")
-        return row.get("checked_at") if not row.get("error") else None
 
     component_details = {
         component: parsed
@@ -997,6 +1090,11 @@ def official_projection_record(
             "status": "tenderStatusName",
         }.items()
     }
+    relations_region_overlay = official_relations_region_overlay(relations)
+    if relations_region_overlay:
+        field_sources["region"] = OFFICIAL_COMPONENT_SOURCE_ID
+    elif meaningful(seed.get("region")):
+        field_sources["region"] = "phase0_baseline"
     sources: list[dict[str, Any]] = []
     if official_observed:
         sources.append(
@@ -1046,7 +1144,11 @@ def official_projection_record(
         "branch": official_payload.get("branchName") or raw.get("branch_name") or seed.get("branch"),
         "type": official_payload.get("tenderTypeName") or raw.get("tender_type_name") or seed.get("type"),
         "activity": official_payload.get("tenderActivityName") or raw.get("activity_name") or seed.get("activity"),
-        "region": raw.get("region") or seed.get("region"),
+        "region": (
+            (relations_region_overlay or {}).get("region")
+            or raw.get("region")
+            or seed.get("region")
+        ),
         "deadline": first_present(
             official_payload.get("lastOfferPresentationDate"),
             raw.get("deadline"),
@@ -1244,6 +1346,18 @@ def load_official_database(
             for row in connection.execute("SELECT * FROM components"):
                 value = dict(row)
                 components[str(value["reference_number"])][str(value["component"])] = value
+
+        for records in baseline.values():
+            for ref, record in list(records.items()):
+                region_overlay = official_relations_region_overlay(
+                    components.get(ref, {}).get("relations") or {}
+                )
+                if region_overlay:
+                    records[ref] = official_overlay(
+                        record,
+                        region_overlay,
+                        source_id=OFFICIAL_COMPONENT_SOURCE_ID,
+                    )
 
         latest_versions: dict[str, dict[str, Any]] = {}
         if table_columns(connection, "tender_versions"):
@@ -1985,6 +2099,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         },
         "phase0_acquisition": phase0_status,
         "obtained": obtained,
+        "active_scan": official_progress_metadata(database_metadata, "active_scan"),
+        "region_backfill": official_progress_metadata(
+            database_metadata,
+            "region_backfill",
+        ),
     }
     canonical_status["canonical_projection"] = {
         "schemaVersion": SCHEMA_VERSION,

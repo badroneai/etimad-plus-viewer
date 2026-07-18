@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -15,6 +16,7 @@ from export_warehouse import (
     AWARDED_INDEX_PART_ALGORITHM,
     AWARDED_INDEX_PART_COUNT,
     AWARDED_INDEX_PART_FORMAT_VERSION,
+    OFFICIAL_REGION_LABELS,
     SCHEMA_VERSION,
     SHARD_COUNT,
     awarded_index_part_config,
@@ -28,6 +30,8 @@ from export_warehouse import (
 LFS_HEADER = b"version https://git-lfs.github.com/spec/v1"
 AWARDED_INDEX_DESCRIPTOR_MAX_BYTES = 1024 * 1024
 AWARDED_INDEX_PART_MAX_BYTES = 5 * 1024 * 1024
+OFFICIAL_COMPONENT_SOURCE_ID = "etimad_official_components"
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 
 
 def assert_awarded_lifecycle_contract(
@@ -165,6 +169,170 @@ def validate_awarded_index_part(
         previous_ref = ref
         refs[ref] = expected_detail_shard
     return refs
+
+
+def _nonnegative_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _percentage(value: object, *, label: str) -> float:
+    assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+        f"{label} must be numeric"
+    )
+    result = float(value)
+    assert 0.0 <= result <= 100.0, f"{label} is outside 0..100"
+    return result
+
+
+def _assert_percentage(value: object, expected: float, *, label: str) -> None:
+    actual = _percentage(value, label=label)
+    assert abs(actual - round(expected, 6)) <= 0.000001, (
+        f"{label} arithmetic mismatch: {actual} != {round(expected, 6)}"
+    )
+
+
+def assert_active_scan_progress_contract(progress: object) -> None:
+    """Validate the resumable active-scan counter arithmetic."""
+    assert isinstance(progress, dict), "fetch status active_scan is missing"
+    if progress.get("available") is False:
+        assert progress.get("reason") == "official_database_metadata_absent", (
+            "legacy active_scan absence reason is not explicit"
+        )
+        return
+
+    for key in ("denominator", "targets_scanned_unique", "targets_remaining"):
+        assert _nonnegative_integer(progress.get(key)), f"active_scan {key} is invalid"
+    denominator = progress["denominator"]
+    scanned = progress["targets_scanned_unique"]
+    remaining = progress["targets_remaining"]
+    assert scanned <= denominator, "active_scan scanned exceeds denominator"
+    assert remaining == denominator - scanned, "active_scan remaining arithmetic mismatch"
+    expected_coverage = (scanned * 100.0 / denominator) if denominator else 0.0
+    _assert_percentage(
+        progress.get("coverage_percent"),
+        expected_coverage,
+        label="active_scan coverage_percent",
+    )
+    assert isinstance(progress.get("complete"), bool), "active_scan complete flag is invalid"
+    if progress["complete"]:
+        assert remaining == 0, "active_scan is complete with remaining targets"
+    if denominator and remaining == 0:
+        assert progress["complete"], "active_scan reached full coverage without completion"
+
+
+def assert_region_backfill_contract(
+    progress: object,
+    index_by_ref: dict[str, dict],
+    detail_by_ref: dict[str, dict],
+) -> None:
+    """Validate region math and every official region's provenance and evidence."""
+    assert isinstance(progress, dict), "fetch status region_backfill is missing"
+    if progress.get("available") is False:
+        assert progress.get("reason") == "official_database_metadata_absent", (
+            "legacy region_backfill absence reason is not explicit"
+        )
+        return
+
+    counter_keys = (
+        "awarded_total",
+        "initial_filled",
+        "initial_missing",
+        "backfilled_unique",
+        "current_filled",
+        "remaining",
+    )
+    for key in counter_keys:
+        assert _nonnegative_integer(progress.get(key)), f"region_backfill {key} is invalid"
+    awarded_total = progress["awarded_total"]
+    initial_filled = progress["initial_filled"]
+    initial_missing = progress["initial_missing"]
+    backfilled_unique = progress["backfilled_unique"]
+    current_filled = progress["current_filled"]
+    remaining = progress["remaining"]
+    assert initial_filled + initial_missing == awarded_total, (
+        "region_backfill initial arithmetic mismatch"
+    )
+    assert backfilled_unique <= initial_missing, (
+        "region_backfill unique count exceeds initial gap"
+    )
+    assert current_filled == initial_filled + backfilled_unique, (
+        "region_backfill current arithmetic mismatch"
+    )
+    assert remaining == initial_missing - backfilled_unique, (
+        "region_backfill remaining arithmetic mismatch"
+    )
+    expected_backfill = (
+        backfilled_unique * 100.0 / initial_missing if initial_missing else 100.0
+    )
+    expected_overall = current_filled * 100.0 / awarded_total if awarded_total else 100.0
+    _assert_percentage(
+        progress.get("backfill_percent"),
+        expected_backfill,
+        label="region_backfill backfill_percent",
+    )
+    _assert_percentage(
+        progress.get("overall_fill_percent"),
+        expected_overall,
+        label="region_backfill overall_fill_percent",
+    )
+
+    assert index_by_ref.keys() == detail_by_ref.keys(), (
+        "region contract index/detail ref set mismatch"
+    )
+    filled_details = 0
+    evidence_backed_official_regions = 0
+    for ref, detail in detail_by_ref.items():
+        index_region = str(index_by_ref[ref].get("region") or "").strip()
+        detail_region = str(detail.get("region") or "").strip()
+        assert index_region == detail_region, f"awarded index/detail region mismatch: {ref}"
+        if detail_region:
+            filled_details += 1
+        provenance = detail.get("_provenance") or {}
+        field_sources = provenance.get("fieldSources") or {}
+        if field_sources.get("region") != OFFICIAL_COMPONENT_SOURCE_ID:
+            continue
+        evidence_backed_official_regions += 1
+        assert detail_region, f"official region provenance has a blank value: {ref}"
+        region_labels = [label.strip() for label in detail_region.split("،")]
+        assert region_labels and all(
+            label in OFFICIAL_REGION_LABELS for label in region_labels
+        ), f"official region is outside the parser vocabulary: {ref}"
+        assert detail_region == "، ".join(region_labels), (
+            f"official multi-region value is not canonical: {ref}"
+        )
+        sources = provenance.get("sources") or []
+        assert any(
+            isinstance(source, dict)
+            and source.get("id") == OFFICIAL_COMPONENT_SOURCE_ID
+            for source in sources
+        ), f"official region source marker missing: {ref}"
+        relations = (detail.get("_evidence") or {}).get("relations") or {}
+        raw_path = str(relations.get("rawPath") or "").strip()
+        sha256 = str(relations.get("sha256") or "").strip()
+        parser_version = relations.get("parserVersion")
+        assert raw_path, f"official region rawPath missing: {ref}"
+        assert SHA256_PATTERN.fullmatch(sha256), f"official region SHA-256 invalid: {ref}"
+        assert (
+            isinstance(parser_version, int)
+            and not isinstance(parser_version, bool)
+            and parser_version >= 1
+        ), (
+            f"official region parserVersion invalid: {ref}"
+        )
+        relations_checked_at = str(
+            (detail.get("_freshness") or {}).get("relationsCheckedAt") or ""
+        ).strip()
+        assert relations_checked_at, f"official region freshness missing: {ref}"
+
+    assert len(detail_by_ref) == awarded_total, (
+        "published awarded dataset disagrees with region backfill cohort"
+    )
+    assert filled_details == current_filled, (
+        "published awarded region count disagrees with region_backfill current_filled"
+    )
+    assert evidence_backed_official_regions >= backfilled_unique, (
+        "published evidence-backed official regions trail region_backfill progress"
+    )
 
 
 def load_asset(path: Path):
@@ -360,8 +528,12 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
         )
         overlap = set(index_by_ref) & set(refs)
         assert not overlap, f"duplicate refs across awarded index parts: {sorted(overlap)[:3]}"
+        rows_by_ref = {str(row["ref"]): row for row in payload["records"]}
         for ref, detail_shard in refs.items():
-            index_by_ref[ref] = {"_detailShard": detail_shard}
+            index_by_ref[ref] = {
+                "_detailShard": detail_shard,
+                "region": rows_by_ref[ref].get("region"),
+            }
     assert len(index_by_ref) == index["count"], "awarded index union/count mismatch"
 
     detail_by_ref = {}
@@ -412,6 +584,13 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
     for ref, row in index_by_ref.items():
         expected = f"{shard_for_ref(ref):02d}"
         assert row.get("_detailShard") == expected, f"index shard lookup mismatch: {ref}"
+
+    assert_active_scan_progress_contract(fetch_status.get("active_scan"))
+    assert_region_backfill_contract(
+        fetch_status.get("region_backfill"),
+        index_by_ref,
+        detail_by_ref,
+    )
 
     return {
         "assets": len(assets),
