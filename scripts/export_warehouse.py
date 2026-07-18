@@ -29,9 +29,6 @@ PLUS_CANDIDATES = tuple(
     Path(value)
     for value in (
         os.environ.get("ETIMAD_WAREHOUSE"),
-        "/Users/baderalsalman/code/etimad-platform-wt/etimad-platform/data/plus_warehouse",
-        "/Users/baderalsalman/code/ksa-coffee-atlas/etimad-platform/data/plus_warehouse",
-        r"C:\Users\hp\ksa-coffee-atlas\etimad-platform\data\plus_warehouse",
     )
     if value
 )
@@ -207,12 +204,46 @@ def has_status_term(status: str, terms: Iterable[str]) -> bool:
     return any(term in status for term in terms)
 
 
-def award_is_announced(record: dict[str, Any]) -> bool:
+def bid_count_is_zero(record: dict[str, Any]) -> bool:
+    """Return true only when the projection contains no bid evidence."""
+    value = record.get("bids")
+    if isinstance(value, list):
+        return len(value) == 0
+    if isinstance(value, bool):
+        return False
+    if value not in (None, ""):
+        try:
+            return Decimal(str(value).strip()) == 0
+        except (InvalidOperation, ValueError):
+            return False
+    return not meaningful(record.get("allBids")) and not meaningful(record.get("winners"))
+
+
+def future_deadline_without_award_proof(
+    record: dict[str, Any],
+    *,
+    as_of: datetime,
+) -> bool:
+    """Identify the forbidden null-award/future-deadline lifecycle combination."""
+    deadline = parse_iso_datetime(record.get("deadline"), date_end_of_day=True)
+    return bool(
+        deadline is not None
+        and deadline >= as_of
+        and not meaningful(record.get("winAmount"))
+        and bid_count_is_zero(record)
+    )
+
+
+def award_is_announced(
+    record: dict[str, Any],
+    *,
+    as_of: datetime | None = None,
+) -> bool:
     status = normalized_status(record.get("status"))
+    if as_of is not None and future_deadline_without_award_proof(record, as_of=as_of):
+        return False
     return bool(
         record.get("awardState") == "announced"
-        or record.get("awardCompleteness")
-        in (True, "complete", "announced", "all_groups_announced")
         or meaningful(record.get("winners"))
         or meaningful(record.get("winAmount"))
         or has_status_term(status, AWARDED_STATUS_TERMS)
@@ -228,7 +259,7 @@ def classify_tender(
     status = normalized_status(record.get("status"))
     status_id = record.get("statusId")
     deadline = parse_iso_datetime(record.get("deadline"), date_end_of_day=True)
-    if award_is_announced(record):
+    if award_is_announced(record, as_of=as_of):
         return "awarded", "award_evidence", deadline
     if has_status_term(status, CANCELLED_STATUS_TERMS):
         return "cancelled", "official_status_cancelled", deadline
@@ -457,6 +488,7 @@ def official_overlay(
     official: dict[str, Any],
     *,
     source_id: str = "etimad_official_periodic",
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Overlay authoritative non-null metadata without erasing Phase-0 awards."""
     result = deepcopy(base) if base else {}
@@ -489,9 +521,19 @@ def official_overlay(
         if meaningful(official_provenance.get(key)):
             result["_provenance"][key] = deepcopy(official_provenance[key])
 
-    official_award_complete = official.get("awardState") == "announced" or official.get(
-        "awardCompleteness"
-    ) in (True, "complete", "announced", "all_groups_announced")
+    award_complete_marker = official.get("awardCompleteness") in (
+        True,
+        "complete",
+        "announced",
+        "all_groups_announced",
+    )
+    official_award_complete = bool(
+        (official.get("awardState") == "announced" or award_complete_marker)
+        and award_is_announced(
+            official,
+            as_of=as_of or datetime.now(timezone.utc),
+        )
+    )
     for key, value in official.items():
         if key.startswith("_") or not meaningful(value):
             continue
@@ -519,10 +561,12 @@ def official_overlay(
 def merge_source_maps(
     primary: OrderedDict[str, dict[str, Any]],
     overlays: dict[str, dict[str, Any]],
+    *,
+    as_of: datetime | None = None,
 ) -> OrderedDict[str, dict[str, Any]]:
     merged = OrderedDict((ref, deepcopy(record)) for ref, record in primary.items())
     for ref, official in overlays.items():
-        merged[ref] = official_overlay(merged.get(ref), official)
+        merged[ref] = official_overlay(merged.get(ref), official, as_of=as_of)
     return merged
 
 
@@ -1621,7 +1665,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         as_of = datetime.now(timezone.utc)
     as_of_iso = as_of.isoformat()
 
-    lifecycle_candidates = merge_source_maps(plus_maps["open"], official)
+    lifecycle_candidates = merge_source_maps(plus_maps["open"], official, as_of=as_of)
     lifecycle_maps: dict[str, OrderedDict[str, dict[str, Any]]] = {
         "open": OrderedDict(),
         "awarding": OrderedDict(),
@@ -1638,9 +1682,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     awarded_official = OrderedDict(
         (ref, record)
         for ref, record in official.items()
-        if award_is_announced(record)
+        if award_is_announced(record, as_of=as_of)
     )
-    awarded_map = merge_source_maps(plus_maps["awarded"], awarded_official)
+    awarded_map = merge_source_maps(
+        plus_maps["awarded"],
+        awarded_official,
+        as_of=as_of,
+    )
     for record in awarded_map.values():
         record["tenderCategory"] = "awarded"
         record["tenderCategoryBasis"] = "phase0_or_official_award_evidence"
@@ -1927,7 +1975,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plus-warehouse",
         type=Path,
-        help="Phase-0 plus_warehouse root; auto-detected locally when omitted",
+        help="Phase-0 plus_warehouse root; defaults only to ETIMAD_WAREHOUSE when set",
     )
     parser.add_argument(
         "--no-plus",

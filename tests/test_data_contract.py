@@ -75,6 +75,7 @@ class RemoteContractTests(unittest.TestCase):
                 "schema": "kashaf.static-warehouse",
                 "schema_version": SCHEMA_VERSION,
                 "snapshot_id": "remote-test",
+                "as_of": "2026-07-18T12:00:00+00:00",
                 "datasets": [
                     {
                         "id": "awarded",

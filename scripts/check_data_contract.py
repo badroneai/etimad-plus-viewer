@@ -11,10 +11,37 @@ from urllib.parse import quote
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from export_warehouse import SCHEMA_VERSION, SHARD_COUNT, shard_for_ref, to_halalas
+from export_warehouse import (
+    SCHEMA_VERSION,
+    SHARD_COUNT,
+    parse_iso_datetime,
+    shard_for_ref,
+    to_halalas,
+)
 
 
 LFS_HEADER = b"version https://git-lfs.github.com/spec/v1"
+
+
+def assert_awarded_lifecycle_contract(
+    records: list[dict],
+    *,
+    as_of: str,
+) -> None:
+    """Fail closed on an awarded row that is still future and has no amount."""
+    classified_at = parse_iso_datetime(as_of)
+    assert classified_at is not None, "manifest as_of is missing or invalid"
+    for row in records:
+        deadline = parse_iso_datetime(row.get("deadline"), date_end_of_day=True)
+        if (
+            row.get("winAmount") in (None, "")
+            and deadline is not None
+            and deadline >= classified_at
+        ):
+            raise AssertionError(
+                "awarded row has null amount and future deadline: "
+                f"{row.get('ref')} deadline={deadline.isoformat()} as_of={classified_at.isoformat()}"
+            )
 
 
 def load_asset(path: Path):
@@ -154,6 +181,10 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
 
     index = parsed_assets.get("awarded_index.json")
     assert index and isinstance(index.get("records"), list), "awarded index missing"
+    assert_awarded_lifecycle_contract(
+        index["records"],
+        as_of=str(manifest.get("as_of") or ""),
+    )
     for volatile in ("generatedAt", "sourceTimes", "exportedAt", "exported_at"):
         assert volatile not in (index.get("meta") or {}), f"volatile awarded index meta: {volatile}"
     assert (data / "awarded_index.json").stat().st_size < 50 * 1024 * 1024, "awarded index exceeds 50 MiB"
@@ -222,6 +253,7 @@ def fetch_remote_asset(
     expected: dict,
     *,
     cache_key: str,
+    awarded_as_of: str | None = None,
 ) -> dict:
     path = Path(name)
     if path.is_absolute() or ".." in path.parts:
@@ -263,6 +295,11 @@ def fetch_remote_asset(
         "signature": (expected.get("bytes"), expected.get("sha256")),
     }
     if name == "awarded_index.json":
+        assert awarded_as_of is not None, "remote manifest as_of is missing"
+        assert_awarded_lifecycle_contract(
+            parsed.get("records") or [],
+            as_of=awarded_as_of,
+        )
         refs = {}
         for row in parsed.get("records") or []:
             ref = str(row["ref"])
@@ -305,6 +342,7 @@ def verify_remote_assets(
         != (expected.get("bytes"), expected.get("sha256"))
     }
     errors: list[str] = []
+    awarded_as_of = str(manifest.get("as_of") or "")
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(pending)))) as executor:
         futures = {
             executor.submit(
@@ -313,6 +351,7 @@ def verify_remote_assets(
                 name,
                 expected,
                 cache_key=cache_key,
+                awarded_as_of=awarded_as_of,
             ): name
             for name, expected in pending.items()
         }

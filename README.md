@@ -6,6 +6,12 @@
 
 https://badroneai.github.io/etimad-plus-viewer/
 
+## التشغيل السحابي
+
+الجلب الرسمي وبناء الإسقاط والنشر إلى Pages تعمل على GitHub ولا تعتمد على جهاز
+محلي. راجع [CLOUD_OPERATIONS.md](CLOUD_OPERATIONS.md) لمصادر الحقيقة، وتسلسل
+النشر، وفحوص السلامة، وإجراءات التشخيص.
+
 ## عقد البيانات v2
 
 - `data/awarded_index.json`: فهرس بحث/جدول صغير بلا مصفوفات العروض الثقيلة.

@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from export_warehouse import (  # noqa: E402
     SHARD_COUNT,
     add_money_projection,
+    award_is_announced,
     build,
+    classify_tender,
     load_official_database,
     official_overlay,
     official_projection_record,
@@ -26,7 +28,7 @@ from export_warehouse import (  # noqa: E402
     shard_for_ref,
     to_halalas,
 )
-from check_data_contract import check  # noqa: E402
+from check_data_contract import assert_awarded_lifecycle_contract, check  # noqa: E402
 
 
 def write_phase0_lock(path: Path, *, has_more: bool = True) -> Path:
@@ -65,6 +67,43 @@ def build_args(root: Path, database: Path, lock: Path, **overrides):
 
 
 class ExportContractTests(unittest.TestCase):
+    def test_future_null_zero_bid_record_cannot_be_awarded(self):
+        as_of = __import__("datetime").datetime.fromisoformat(
+            "2026-07-18T12:00:00+00:00"
+        )
+        record = seed_record(
+            {
+                "ref": "260639008661",
+                "statusId": 4,
+                "deadline": "2026-08-01T09:59:00",
+                "winAmount": None,
+                "bids": 0,
+                "awardState": "pending",
+                "awardCompleteness": True,
+            },
+            source_id="etimad_official_periodic",
+            fetched_at="2026-07-18T11:00:00+00:00",
+            layer="tenders",
+        )
+        self.assertFalse(award_is_announced(record, as_of=as_of))
+        self.assertEqual(classify_tender(record, as_of=as_of)[0], "open")
+
+    def test_contract_rejects_synthetic_future_null_award(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            "awarded row has null amount and future deadline: REGRESSION-1",
+        ):
+            assert_awarded_lifecycle_contract(
+                [
+                    {
+                        "ref": "REGRESSION-1",
+                        "winAmount": None,
+                        "deadline": "2026-08-01T09:59:00",
+                    }
+                ],
+                as_of="2026-07-18T12:00:00+00:00",
+            )
+
     def test_awarded_truth_sources_fail_closed_when_lock_and_db_disagree(self):
         with self.assertRaisesRegex(RuntimeError, "sources disagree"):
             resolve_awarded_truth(
