@@ -5,7 +5,18 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\hp\ksa-coffee-atlas\etimad-platform\data\plus_warehouse")
+# Prefer Mac warehouse (current fetch worktree), then Windows laptop path, then env override.
+_CANDIDATES = [
+    Path(p)
+    for p in (
+        __import__("os").environ.get("ETIMAD_WAREHOUSE"),
+        "/Users/baderalsalman/code/etimad-platform-wt/etimad-platform/data/plus_warehouse",
+        "/Users/baderalsalman/code/ksa-coffee-atlas/etimad-platform/data/plus_warehouse",
+        r"C:\Users\hp\ksa-coffee-atlas\etimad-platform\data\plus_warehouse",
+    )
+    if p
+]
+ROOT = next((p for p in _CANDIDATES if (p / "layers").is_dir()), _CANDIDATES[0])
 LAYERS = ROOT / "layers"
 META = ROOT / "meta"
 OUT = Path(__file__).resolve().parents[1] / "data"
@@ -34,6 +45,7 @@ def main():
     files = {}
 
     # --- tenders ---
+    print(f"warehouse ROOT={ROOT}")
     for src, dst, partial in [
         ("81_tenders_open.json", "open.json", False),
         ("81_tenders_within_7.json", "within_7.json", False),
@@ -49,6 +61,20 @@ def main():
                 fetched_at=d.get("fetched_at"),
                 partial=partial,
                 fields="full",
+            ),
+        )
+
+    # winnerfacet (may be partial guest dump)
+    wf_path = LAYERS / "82_winnerfacet.json"
+    if wf_path.exists():
+        wf = load("82_winnerfacet.json")
+        files["winnerfacet.json"] = dump(
+            "winnerfacet.json",
+            pack(
+                wf.get("records") or [],
+                source_layer="82_winnerfacet.json",
+                fetched_at=wf.get("fetched_at"),
+                partial=bool(wf.get("partial")),
             ),
         )
 
@@ -200,7 +226,15 @@ def main():
             "file": "awarded.json",
             "title": "مرساة (جزئي)",
             "group": "tenders",
-            "count": 11300,
+            "count": 19200,
+            "partial": True,
+        },
+        {
+            "id": "winnerfacet",
+            "file": "winnerfacet.json",
+            "title": "فائزون (winnerfacet)",
+            "group": "entities",
+            "count": 300,
             "partial": True,
         },
         {"id": "ssr_tenders", "file": "ssr_tenders.json", "title": "عيّنة SSR للمنافسات", "group": "tenders", "count": 50},

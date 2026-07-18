@@ -108,6 +108,7 @@
     datasetId: "open",
     explorerReady: false,
     q: "",
+    region: "",
     activity: "",
     type: "",
     page: 1,
@@ -124,6 +125,7 @@
     groupTabs: document.getElementById("groupTabs"),
     datasetTabs: document.getElementById("datasetTabs"),
     search: document.getElementById("search"),
+    filterRegion: document.getElementById("filterRegion"),
     filterActivity: document.getElementById("filterActivity"),
     filterType: document.getElementById("filterType"),
     setMeta: document.getElementById("setMeta"),
@@ -212,6 +214,30 @@
     if ([...select.options].some((o) => o.value === cur)) select.value = cur;
   }
 
+  function regionTokens(raw) {
+    if (raw == null || raw === "") return [];
+    return String(raw)
+      .split(/[،,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function collectRegions(rows) {
+    const set = new Set();
+    for (const r of rows) {
+      for (const tok of regionTokens(r.region)) set.add(tok);
+    }
+    return [...set].sort((a, b) => String(a).localeCompare(String(b), "ar"));
+  }
+
+  function rowMatchesRegion(row, region) {
+    if (!region) return true;
+    const tokens = regionTokens(row.region);
+    if (tokens.includes(region)) return true;
+    // fallback: exact full-string match (covers odd separators)
+    return String(row.region || "") === region;
+  }
+
   function renderInventory() {
     const m = state.manifest;
     const obtained = m.obtained || {};
@@ -294,6 +320,7 @@
     let out = rows;
     const q = state.q.trim().toLowerCase();
     if (q) out = out.filter((r) => rowSearchBlob(r).includes(q));
+    if (state.region) out = out.filter((r) => rowMatchesRegion(r, state.region));
     if (state.activity) out = out.filter((r) => r.activity === state.activity);
     if (state.type) out = out.filter((r) => r.type === state.type);
     return out;
@@ -468,6 +495,7 @@
   }
 
   function renderMetaFile(json, datasetId) {
+    if (el.filterRegion) el.filterRegion.hidden = true;
     el.filterActivity.hidden = true;
     el.filterType.hidden = true;
     if (el.cardList) el.cardList.innerHTML = "";
@@ -517,8 +545,12 @@
 
     let rows = Array.isArray(raw) ? raw : raw.records || [];
     if (TENDER_SETS.has(ds.id)) {
+      if (el.filterRegion) el.filterRegion.hidden = false;
       el.filterActivity.hidden = false;
       el.filterType.hidden = false;
+      if (el.filterRegion) {
+        fillSelect(el.filterRegion, collectRegions(rows), "كل المناطق");
+      }
       fillSelect(
         el.filterActivity,
         [...new Set(rows.map((r) => r.activity).filter(Boolean))].sort((a, b) =>
@@ -534,6 +566,7 @@
         "كل الأنواع"
       );
     } else {
+      if (el.filterRegion) el.filterRegion.hidden = true;
       el.filterActivity.hidden = true;
       el.filterType.hidden = true;
     }
@@ -776,9 +809,11 @@
     state.group = ds.group;
     state.page = 1;
     state.q = "";
+    state.region = "";
     state.activity = "";
     state.type = "";
     if (el.search) el.search.value = "";
+    if (el.filterRegion) el.filterRegion.value = "";
     renderGroupTabs();
     renderDatasetTabs();
     el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
@@ -850,6 +885,13 @@
       state.page = 1;
       renderTable();
     });
+    if (el.filterRegion) {
+      el.filterRegion.addEventListener("change", () => {
+        state.region = el.filterRegion.value;
+        state.page = 1;
+        renderTable();
+      });
+    }
     el.filterActivity.addEventListener("change", () => {
       state.activity = el.filterActivity.value;
       state.page = 1;

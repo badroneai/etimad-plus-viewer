@@ -78,9 +78,10 @@
     <div class="dataset-tabs" id="datasetTabs"></div>
 
     <div class="toolbar" id="toolbar">
-      <input type="search" id="search" class="q" placeholder="بحث في المجموعة الحالية…" />
-      <select id="filterActivity"><option value="">كل الأنشطة</option></select>
-      <select id="filterType"><option value="">كل الأنواع</option></select>
+      <input type="search" id="search" class="q" placeholder="بحث في الاسم، الجهة، المنطقة…" />
+      <select id="filterRegion" aria-label="المنطقة"><option value="">كل المناطق</option></select>
+      <select id="filterActivity" aria-label="النشاط"><option value="">كل الأنشطة</option></select>
+      <select id="filterType" aria-label="النوع"><option value="">كل الأنواع</option></select>
     </div>
 
     <p class="fineprint" id="setMeta"></p>
@@ -129,6 +130,6 @@
     </aside>
   </div>
 
-  <script src="assets/app.js?v=10" defer></script>
+  <script src="assets/app.js?v=11" defer></script>
 </body>
 </html>

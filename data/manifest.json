@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-07-17T18:04:26.806266+00:00",
+  "generated_at": "2026-07-18T04:10:05.621809+00:00",
   "source": "etimadplus.com warehouse — full usable mirror",
-  "note": "كل الطبقات القابلة للعرض مدمجة. الواجهة عربية. المنافسات المفتوحة ذات الأسماء الإنجليزية مُعرَّبة مع الإبقاء على الأصل.",
+  "note": "كل الطبقات القابلة للعرض من المستودع مدمجة هنا. الناقص فقط ما لم يُجلب بعد (بقية المرساة / winnerfacet / all).",
   "facets": {
     "grand": 379552,
     "active": 1664,
@@ -11,32 +11,22 @@
     "open_tenders_complete": 1604,
     "within_7": 782,
     "within_30": 1580,
-    "awarded_yes_partial": 11300,
+    "awarded_yes_partial": 50000,
+    "awarded_yes_pages": 500,
+    "awarded_hasMore_at_stop": true,
+    "winnerfacet_count": 300,
+    "winnerfacet_partial": true,
+    "all_unfiltered": 0,
     "activities_from_facets": 138,
     "agencies_from_facets": 802,
     "types_from_facets": 9,
-    "facets_grand": 379552,
-    "facets_active": 1664,
-    "facets_soon": 293,
-    "api_agencies": 600,
-    "api_companies": 60,
-    "ssr_tenders": 50,
-    "ssr_companies": 200,
-    "ssr_agencies": 600,
-    "sitemap_urls_total": 35418,
-    "sitemap_tenders": 13665,
-    "sitemap_companies": 20968,
-    "sitemap_agencies": 696,
-    "sitemap_activities": 82,
-    "layers_80_facets_files": 4,
-    "layers_83_86_87_facet_extracts": true
+    "82_winnerfacet_json": true,
+    "winnerfacet_usable_payload": true
   },
   "still_missing": {
-    "awarded_yes_remainder_after_11300": true,
+    "awarded_yes_remainder_after_50000": true,
     "all_unfiltered_dump": true,
-    "82_winnerfacet_json": true,
-    "winnerfacet_usable_payload": true,
-    "priority_save_non_gated_bodies": true
+    "winnerfacet_full_non_partial": true
   },
   "datasets": [
     {
@@ -65,7 +55,15 @@
       "file": "awarded.json",
       "title": "مرساة (جزئي)",
       "group": "tenders",
-      "count": 11300,
+      "count": 50000,
+      "partial": true
+    },
+    {
+      "id": "winnerfacet",
+      "file": "winnerfacet.json",
+      "title": "فائزون (winnerfacet)",
+      "group": "entities",
+      "count": 300,
       "partial": true
     },
     {
@@ -178,7 +176,8 @@
     "open.json": 1266907,
     "within_7.json": 615489,
     "within_30.json": 1246532,
-    "awarded.json": 20031273,
+    "awarded.json": 91487872,
+    "winnerfacet.json": 46828,
     "ssr_tenders.json": 34703,
     "activities.json": 11341,
     "agencies.json": 57452,
@@ -194,8 +193,7 @@
     "tender_refs_sitemap.json": 1257284,
     "activities_sitemap.json": 6403,
     "taxonomy_observed.json": 5625,
-    "fetch_status.json": 1642,
-    "inventory.json": 6243
-  },
-  "open_english_translated": 236
+    "fetch_status.json": 1673,
+    "inventory.json": 6236
+  }
 }
