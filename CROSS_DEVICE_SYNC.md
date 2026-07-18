@@ -1,10 +1,9 @@
 # مزامنة كشاف — بعد جلب الماك
 
-آخر تصدير من مستودع الجلب (`awarded=50000` جزئي، `winnerfacet=300` جزئي).
+آخر تصدير: `awarded=50000` جزئي · `winnerfacet=300` جزئي · فلتر المنطقة في المستكشف.
 
-- المصدر: `ksa-coffee-atlas` فرع `cursor/etimad-tenders-platform-a39e`
-- راجع أيضاً: `etimad-platform/CROSS_DEVICE_SYNC.md` هناك
-- جديد في الواجهة: فلتر **المنطقة** في المستكشف
+**هاندوفر الجلب الكامل (للوكيل التالي):**  
+https://github.com/badroneai/ksa-coffee-atlas/blob/cursor/etimad-tenders-platform-a39e/etimad-platform/HANDOVER_CODEX.md
 
 ```bash
 python scripts/export_warehouse.py   # بعد أي جلب جديد
