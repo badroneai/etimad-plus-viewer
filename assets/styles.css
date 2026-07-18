@@ -285,6 +285,15 @@ body {
 
 .toolbar select option { color: #111; }
 
+.explorer-error {
+  margin: 0 0 1rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid rgba(255, 176, 137, 0.45);
+  border-radius: 10px;
+  background: rgba(120, 36, 22, 0.22);
+  color: #ffd5c1;
+}
+
 .table-wrap {
   overflow: auto;
   -webkit-overflow-scrolling: touch;

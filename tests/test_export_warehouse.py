@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from export_warehouse import (  # noqa: E402
+    AWARDED_INDEX_PART_COUNT,
     SHARD_COUNT,
     add_money_projection,
     award_is_announced,
@@ -22,6 +23,7 @@ from export_warehouse import (  # noqa: E402
     load_official_database,
     official_overlay,
     official_projection_record,
+    index_part_for_ref,
     resolve_awarded_truth,
     searchable_award,
     seed_record,
@@ -122,6 +124,14 @@ class ExportContractTests(unittest.TestCase):
         ref = "260639009354"
         expected = hashlib.sha256(ref.encode("utf-8")).digest()[0] % SHARD_COUNT
         self.assertEqual(shard_for_ref(ref), expected)
+
+    def test_awarded_index_part_algorithm_is_sha256_first_byte(self):
+        ref = "260639009354"
+        expected = (
+            hashlib.sha256(ref.encode("utf-8")).digest()[0]
+            % AWARDED_INDEX_PART_COUNT
+        )
+        self.assertEqual(index_part_for_ref(ref), expected)
 
     def test_official_metadata_wins_without_erasing_phase0_award(self):
         phase0 = seed_record(
@@ -596,14 +606,18 @@ class ExportContractTests(unittest.TestCase):
             stable_awarded = {
                 name: digest
                 for name, digest in second_hashes.items()
-                if name == "awarded_index.json" or name.startswith("awarded_details/")
+                if name == "awarded_index.json"
+                or name.startswith("awarded_index_parts/")
+                or name.startswith("awarded_details/")
             }
             args.as_of = "2026-07-25T12:00:00+00:00"
             third = build(args)
             later_awarded = {
                 name: item["sha256"]
                 for name, item in third["assets"].items()
-                if name == "awarded_index.json" or name.startswith("awarded_details/")
+                if name == "awarded_index.json"
+                or name.startswith("awarded_index_parts/")
+                or name.startswith("awarded_details/")
             }
             self.assertEqual(stable_awarded, later_awarded)
 

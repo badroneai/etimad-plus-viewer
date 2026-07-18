@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Markazi+Text:wght@500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="assets/styles.css?v=10" />
+  <link rel="stylesheet" href="assets/styles.css?v=11" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="format-detection" content="telephone=no" />
@@ -79,12 +79,13 @@
     <div class="dataset-tabs" id="datasetTabs"></div>
 
     <div class="toolbar" id="toolbar">
-      <input type="search" id="search" class="q" placeholder="بحث في الاسم، الجهة، المنطقة…" />
+      <input type="search" id="search" class="q" aria-label="البحث في المنافسات والبيانات" placeholder="بحث في الاسم، الجهة، المنطقة…" />
       <select id="filterRegion" aria-label="المنطقة"><option value="">كل المناطق</option></select>
       <select id="filterActivity" aria-label="النشاط"><option value="">كل الأنشطة</option></select>
       <select id="filterType" aria-label="النوع"><option value="">كل الأنواع</option></select>
     </div>
 
+    <p class="explorer-error" id="explorerError" role="alert" aria-live="assertive" hidden></p>
     <p class="fineprint" id="setMeta"></p>
 
     <div class="table-wrap" id="tableWrap">
@@ -110,7 +111,7 @@
 
   <div id="detailRoot" class="detail" aria-hidden="true">
     <button type="button" class="detail-backdrop" id="detailBackdrop" aria-label="إغلاق"></button>
-    <aside class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+    <aside class="detail-panel" role="dialog" aria-modal="true" aria-labelledby="detailTitle" tabindex="-1">
       <header class="detail-head">
         <div class="detail-head-top">
           <span class="detail-brand">كشاف · تفاصيل محلية</span>
@@ -131,6 +132,6 @@
     </aside>
   </div>
 
-  <script src="assets/app.js?v=12" defer></script>
+  <script src="assets/app.js?v=13" defer></script>
 </body>
 </html>

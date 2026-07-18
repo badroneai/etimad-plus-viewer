@@ -1,7 +1,8 @@
 """Build the Kashaf static data contract from the Phase-0 and official warehouses.
 
-The awarded catalogue is deliberately split into a compact searchable index and
-64 deterministic detail shards.  No generated asset requires Git LFS.
+The awarded catalogue is deliberately split into a compact searchable index
+descriptor, 16 deterministic searchable-index parts, and 64 deterministic
+detail shards.  No generated asset requires Git LFS.
 """
 from __future__ import annotations
 
@@ -20,8 +21,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SHARD_COUNT = 64
+AWARDED_INDEX_PART_COUNT = 16
+AWARDED_INDEX_PART_FORMAT_VERSION = 1
+AWARDED_INDEX_PART_ALGORITHM = "sha256_first_byte_mod_16"
 SAUDI_TIMEZONE = timezone(timedelta(hours=3))
 HERE = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = HERE / "data"
@@ -341,11 +345,13 @@ def add_money_projection(record: dict[str, Any]) -> None:
             if isinstance(offer, dict):
                 add_offer_money(offer)
 
-    winner_awards = [
-        offer.get("awardHalalas")
-        for offer in record.get("winners") or []
-        if isinstance(offer, dict) and offer.get("awardHalalas") is not None
-    ]
+    winner_awards: list[int] = []
+    for offer in record.get("winners") or []:
+        if not isinstance(offer, dict):
+            continue
+        award_halalas = offer.get("awardHalalas")
+        if isinstance(award_halalas, int):
+            winner_awards.append(award_halalas)
     if win_halalas is None or not winner_awards:
         record["moneyConsistency"] = {
             "status": "unverifiable",
@@ -583,7 +589,7 @@ def overlay_existing(
 
 
 def phase0_map(
-    records: Iterable[dict[str, Any]],
+    records: Iterable[Any],
     *,
     fetched_at: str | None,
     layer: str,
@@ -623,7 +629,12 @@ def read_plus_layer(root: Path, name: str, *, required: bool = True) -> dict[str
     return value
 
 
-def load_plus_tenders(root: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def load_plus_tenders(
+    root: Path,
+) -> tuple[
+    dict[str, OrderedDict[str, dict[str, Any]]],
+    dict[str, dict[str, Any]],
+]:
     layers: dict[str, dict[str, Any]] = {}
     maps: dict[str, OrderedDict[str, dict[str, Any]]] = {}
     names = {
@@ -1335,8 +1346,30 @@ def shard_for_ref(ref: str, count: int = SHARD_COUNT) -> int:
     return hashlib.sha256(str(ref).encode("utf-8")).digest()[0] % count
 
 
+def index_part_for_ref(
+    ref: str,
+    count: int = AWARDED_INDEX_PART_COUNT,
+) -> int:
+    """Return the stable searchable-index part for a tender reference."""
+    return hashlib.sha256(str(ref).encode("utf-8")).digest()[0] % count
+
+
+def awarded_index_part_config() -> dict[str, Any]:
+    """Return the versioned index-part contract shared with the static UI."""
+    return {
+        "formatVersion": AWARDED_INDEX_PART_FORMAT_VERSION,
+        "count": AWARDED_INDEX_PART_COUNT,
+        "pathTemplate": "awarded_index_parts/{part}.json",
+        "algorithm": AWARDED_INDEX_PART_ALGORITHM,
+    }
+
+
 def searchable_award(record: dict[str, Any]) -> dict[str, Any]:
-    result = {key: record.get(key) for key in INDEX_FIELDS if meaningful(record.get(key))}
+    result: dict[str, Any] = {
+        key: record.get(key)
+        for key in INDEX_FIELDS
+        if meaningful(record.get(key))
+    }
     result["ref"] = str(record["ref"])
     result["_detailShard"] = f"{shard_for_ref(result['ref']):02d}"
     if meaningful(record.get("_source")):
@@ -1350,6 +1383,80 @@ def pack(records: list[dict[str, Any]], **meta: Any) -> dict[str, Any]:
         "count": len(records),
         "records": records,
     }
+
+
+def write_awarded_index(
+    out: Path,
+    assets: dict[str, dict[str, Any]],
+    records: list[dict[str, Any]],
+    *,
+    partial: bool,
+    completeness_basis: list[str],
+) -> dict[str, Any]:
+    """Write a small descriptor plus stable, independently checksummed parts."""
+    config = awarded_index_part_config()
+    buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        buckets[index_part_for_ref(str(record["ref"]))].append(record)
+
+    part_dir = out / "awarded_index_parts"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    expected_parts: set[str] = set()
+    part_descriptors: list[dict[str, Any]] = []
+    for part in range(AWARDED_INDEX_PART_COUNT):
+        part_id = f"{part:02d}"
+        filename = config["pathTemplate"].replace("{part}", part_id)
+        expected_parts.add(Path(filename).name)
+        rows = sorted(buckets.get(part, []), key=lambda row: str(row["ref"]))
+        payload = pack(
+            rows,
+            dataset="awarded_index_part",
+            part=part_id,
+            partCount=AWARDED_INDEX_PART_COUNT,
+            formatVersion=AWARDED_INDEX_PART_FORMAT_VERSION,
+            algorithm=AWARDED_INDEX_PART_ALGORITHM,
+        )
+        descriptor = write_asset(
+            out,
+            filename,
+            payload,
+            count=len(rows),
+            role="awarded_search_index_part",
+        )
+        assets[filename] = descriptor
+        part_descriptors.append(
+            {
+                "part": part_id,
+                "file": filename,
+                "count": len(rows),
+                "bytes": descriptor["bytes"],
+                "sha256": descriptor["sha256"],
+            }
+        )
+
+    for stale in part_dir.glob("*.json"):
+        if stale.name not in expected_parts:
+            stale.unlink()
+
+    root_payload = {
+        "meta": {
+            "schemaVersion": SCHEMA_VERSION,
+            "dataset": "awarded",
+            "partial": partial,
+            "detailShards": SHARD_COUNT,
+            "completenessBasis": completeness_basis,
+            "indexParts": config,
+        },
+        "count": len(records),
+        "parts": part_descriptors,
+    }
+    assets["awarded_index.json"] = write_asset(
+        out,
+        "awarded_index.json",
+        root_payload,
+        role="awarded_search_index_descriptor",
+    )
+    return root_payload
 
 
 def asset_count(out: Path, filename: str) -> int | None:
@@ -1569,6 +1676,7 @@ def build_datasets(out: Path, awarded_partial: bool) -> list[dict[str, Any]]:
         if partial:
             item["partial"] = True
         if dataset_id == "awarded":
+            item["indexParts"] = awarded_index_part_config()
             item["detailShards"] = {
                 "count": SHARD_COUNT,
                 "pathTemplate": "awarded_details/{shard}.json",
@@ -1781,19 +1889,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     index_records = [searchable_award(record) for record in awarded_map.values()]
-    index_payload = pack(
-        index_records,
-        dataset="awarded",
-        partial=awarded_partial,
-        detailShards=SHARD_COUNT,
-        completenessBasis=awarded_truth["validatedBy"],
-    )
-    assets["awarded_index.json"] = write_asset(
+    write_awarded_index(
         out,
-        "awarded_index.json",
-        index_payload,
-        count=len(index_records),
-        role="awarded_search_index",
+        assets,
+        index_records,
+        partial=awarded_partial,
+        completeness_basis=awarded_truth["validatedBy"],
     )
 
     shards: dict[int, list[dict[str, Any]]] = defaultdict(list)
