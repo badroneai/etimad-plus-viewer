@@ -235,8 +235,158 @@ def assert_active_scan_progress_contract(progress: object) -> None:
     assert isinstance(progress.get("complete"), bool), "active_scan complete flag is invalid"
     if progress["complete"]:
         assert remaining == 0, "active_scan is complete with remaining targets"
-    if denominator and remaining == 0:
+    date_fallback = progress.get("date_fallback")
+    if date_fallback is not None:
+        assert_active_date_scan_contract(date_fallback)
+    awaiting_date_authority = bool(
+        isinstance(date_fallback, dict)
+        and not date_fallback.get("completion_authoritative", False)
+    )
+    if progress["complete"]:
+        assert not awaiting_date_authority, (
+            "active_scan completed before date partition authority"
+        )
+    if denominator and remaining == 0 and not awaiting_date_authority:
         assert progress["complete"], "active_scan reached full coverage without completion"
+
+
+def assert_active_date_scan_contract(progress: object) -> None:
+    """Validate the exhaustive date-partition evidence nested in active scan."""
+
+    assert isinstance(progress, dict), "active date scan progress is invalid"
+    for key in (
+        "target_count",
+        "targets_observed_unique",
+        "targets_resolved_unique",
+        "targets_absent_after_full_partitions",
+        "ranges_total",
+        "ranges_pending",
+        "ranges_blocked_single_day",
+        "official_active_scanned_unique",
+        "partition_duplicate_records",
+        "leaf_integrity_error_count",
+        "range_geometry_error_count",
+        "convergence_passes",
+    ):
+        assert _nonnegative_integer(progress.get(key)), (
+            f"active date scan {key} is invalid"
+        )
+    target_count = progress["target_count"]
+    observed = progress["targets_observed_unique"]
+    resolved = progress["targets_resolved_unique"]
+    assert observed <= resolved <= target_count, (
+        "active date scan target arithmetic mismatch"
+    )
+    generation_value = progress.get("generation")
+    assert (
+        isinstance(generation_value, int)
+        and not isinstance(generation_value, bool)
+        and generation_value >= 1
+    ), (
+        "active date scan generation is invalid"
+    )
+    generation = generation_value
+    convergence_last_generation = progress.get("convergence_last_generation")
+    assert convergence_last_generation is None or (
+        _nonnegative_integer(convergence_last_generation)
+        and 1 <= convergence_last_generation <= generation
+    ), "active date scan convergence generation is invalid"
+    assert progress["convergence_passes"] <= generation, (
+        "active date scan convergence exceeds distinct generations"
+    )
+    expected_target_percent = (
+        observed * 100.0 / target_count if target_count else 0.0
+    )
+    _assert_percentage(
+        progress.get("targets_observed_percent"),
+        expected_target_percent,
+        label="active date scan targets_observed_percent",
+    )
+
+    official_total = progress.get("root_filtered_total")
+    scanned = progress["official_active_scanned_unique"]
+    if official_total is None:
+        assert scanned == 0, "active date scan has rows before its root total"
+        expected_scan_percent = 0.0
+    else:
+        assert _nonnegative_integer(official_total), (
+            "active date scan root total is invalid"
+        )
+        assert scanned <= official_total, (
+            "active date scan exceeds its official root total"
+        )
+        expected_scan_percent = (
+            scanned * 100.0 / official_total
+            if official_total
+            else 100.0
+            if progress["partition_authoritative"]
+            else 0.0
+        )
+    _assert_percentage(
+        progress.get("official_active_scanned_percent"),
+        expected_scan_percent,
+        label="active date scan official_active_scanned_percent",
+    )
+
+    for key in (
+        "domain_matches_unfiltered_boundary",
+        "partition_authoritative",
+        "absence_authoritative",
+        "completion_authoritative",
+        "closing_boundary_matches",
+        "convergence_matches_current_union",
+    ):
+        assert isinstance(progress.get(key), bool), (
+            f"active date scan {key} is invalid"
+        )
+    if progress["partition_authoritative"]:
+        assert progress["domain_matches_unfiltered_boundary"], (
+            "active date partition lacks an unfiltered boundary proof"
+        )
+        assert progress["ranges_pending"] == 0, (
+            "authoritative active date partition still has pending ranges"
+        )
+        assert progress["ranges_blocked_single_day"] == 0, (
+            "authoritative active date partition has blocked ranges"
+        )
+        assert progress["partition_duplicate_records"] == 0, (
+            "authoritative active date partition has duplicate records"
+        )
+        assert progress["leaf_integrity_error_count"] == 0, (
+            "authoritative active date partition has invalid leaves"
+        )
+        assert progress["range_geometry_error_count"] == 0, (
+            "authoritative active date partition has a range gap or overlap"
+        )
+        assert official_total is not None and scanned == official_total, (
+            "authoritative active date partition is incomplete"
+        )
+        assert progress["closing_boundary_matches"], (
+            "authoritative active date partition lacks a stable closing boundary"
+        )
+        assert progress["convergence_passes"] >= 2, (
+            "authoritative active date partition lacks two converged generations"
+        )
+        assert convergence_last_generation == generation, (
+            "authoritative active date partition closing generation is stale"
+        )
+        assert progress["convergence_matches_current_union"], (
+            "authoritative active date partition union did not converge"
+        )
+    assert not progress["absence_authoritative"] or (
+        progress["partition_authoritative"]
+        and progress["targets_absent_after_full_partitions"] > 0
+    ), "active date absence lacks partition authority"
+    expected_completion_authority = bool(
+        progress["partition_authoritative"] and resolved == target_count
+    )
+    assert progress["completion_authoritative"] == expected_completion_authority, (
+        "active date completion authority arithmetic mismatch"
+    )
+    if progress["completion_authoritative"]:
+        assert progress["partition_authoritative"], (
+            "active date completion lacks partition authority"
+        )
 
 
 def assert_region_backfill_contract(

@@ -31,6 +31,7 @@ from export_warehouse import (  # noqa: E402
     to_halalas,
 )
 from check_data_contract import (  # noqa: E402
+    assert_active_date_scan_contract,
     assert_active_scan_progress_contract,
     assert_awarded_lifecycle_contract,
     assert_region_backfill_contract,
@@ -628,6 +629,62 @@ class ExportContractTests(unittest.TestCase):
                 "complete": True,
             }
         )
+        pending_date_fallback = {
+            "target_count": 2,
+            "targets_observed_unique": 2,
+            "targets_resolved_unique": 2,
+            "targets_absent_after_full_partitions": 0,
+            "targets_observed_percent": 100.0,
+            "ranges_total": 1,
+            "ranges_pending": 0,
+            "ranges_blocked_single_day": 0,
+            "root_filtered_total": 2,
+            "official_active_scanned_unique": 2,
+            "official_active_scanned_percent": 100.0,
+            "partition_duplicate_records": 0,
+            "leaf_integrity_error_count": 0,
+            "range_geometry_error_count": 0,
+            "convergence_passes": 1,
+            "generation": 1,
+            "convergence_last_generation": 1,
+            "domain_matches_unfiltered_boundary": True,
+            "partition_authoritative": False,
+            "absence_authoritative": False,
+            "completion_authoritative": False,
+            "closing_boundary_matches": True,
+            "convergence_matches_current_union": True,
+        }
+        assert_active_scan_progress_contract(
+            {
+                "denominator": 2,
+                "targets_scanned_unique": 2,
+                "targets_resolved_unique": 2,
+                "targets_absent_after_full_pass": 0,
+                "targets_remaining": 0,
+                "scanned_percent": 100.0,
+                "coverage_percent": 100.0,
+                "absence_confirmation_passes": 2,
+                "complete": False,
+                "date_fallback": pending_date_fallback,
+            }
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "completed before date partition authority"
+        ):
+            assert_active_scan_progress_contract(
+                {
+                    "denominator": 2,
+                    "targets_scanned_unique": 2,
+                    "targets_resolved_unique": 2,
+                    "targets_absent_after_full_pass": 0,
+                    "targets_remaining": 0,
+                    "scanned_percent": 100.0,
+                    "coverage_percent": 100.0,
+                    "absence_confirmation_passes": 2,
+                    "complete": True,
+                    "date_fallback": pending_date_fallback,
+                }
+            )
         with self.assertRaisesRegex(AssertionError, "remaining arithmetic"):
             assert_active_scan_progress_contract(
                 {
@@ -681,6 +738,64 @@ class ExportContractTests(unittest.TestCase):
         detail["R"]["_evidence"]["relations"]["sha256"] = "not-a-sha256"
         with self.assertRaisesRegex(AssertionError, "SHA-256 invalid"):
             assert_region_backfill_contract(progress, index, detail)
+
+    def test_active_date_partition_contract_requires_exact_union(self):
+        progress = {
+            "target_count": 2,
+            "targets_observed_unique": 2,
+            "targets_resolved_unique": 2,
+            "targets_absent_after_full_partitions": 0,
+            "targets_observed_percent": 100.0,
+            "ranges_total": 3,
+            "ranges_pending": 0,
+            "ranges_blocked_single_day": 0,
+            "root_filtered_total": 2,
+            "official_active_scanned_unique": 2,
+            "official_active_scanned_percent": 100.0,
+            "partition_duplicate_records": 0,
+            "leaf_integrity_error_count": 0,
+            "range_geometry_error_count": 0,
+            "convergence_passes": 2,
+            "generation": 2,
+            "convergence_last_generation": 2,
+            "domain_matches_unfiltered_boundary": True,
+            "partition_authoritative": True,
+            "absence_authoritative": False,
+            "completion_authoritative": True,
+            "closing_boundary_matches": True,
+            "convergence_matches_current_union": True,
+        }
+        assert_active_date_scan_contract(progress)
+
+        duplicate = {**progress, "partition_duplicate_records": 1}
+        with self.assertRaisesRegex(AssertionError, "duplicate records"):
+            assert_active_date_scan_contract(duplicate)
+
+        pending = {**progress, "ranges_pending": 1}
+        with self.assertRaisesRegex(AssertionError, "pending ranges"):
+            assert_active_date_scan_contract(pending)
+
+        same_generation = {
+            **progress,
+            "generation": 1,
+            "convergence_last_generation": 1,
+        }
+        with self.assertRaisesRegex(AssertionError, "distinct generations"):
+            assert_active_date_scan_contract(same_generation)
+
+        absence_without_authority = {
+            **progress,
+            "partition_authoritative": False,
+            "completion_authoritative": False,
+            "absence_authoritative": True,
+            "targets_absent_after_full_partitions": 1,
+        }
+        with self.assertRaisesRegex(AssertionError, "absence lacks"):
+            assert_active_date_scan_contract(absence_without_authority)
+
+        incomplete_authority = {**progress, "completion_authoritative": False}
+        with self.assertRaisesRegex(AssertionError, "completion authority arithmetic"):
+            assert_active_date_scan_contract(incomplete_authority)
 
     def test_lifecycle_and_deadline_windows_are_recomputed_from_snapshot_time(self):
         with tempfile.TemporaryDirectory() as temp:
