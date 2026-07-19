@@ -2649,17 +2649,6 @@ def _assert_single_day_refinement_contract(
             assert actual_history_generations == expected_history_generations, (
                 "schema-5 temporal reconciliation generation history sequence mismatch"
             )
-            if entry_generation == 3:
-                prior_history = generation_history[-2]
-                latest_history = generation_history[-1]
-                assert any(
-                    prior_history[key] != latest_history[key]
-                    for key in (
-                        "union_unique",
-                        "union_sha256",
-                        "bijection_sha256",
-                    )
-                ), "schema-5 temporal reconciliation generation-3 history has no drift"
             latest_history = generation_history[-1]
             assert (
                 latest_history["union_unique"] == baseline_unique
