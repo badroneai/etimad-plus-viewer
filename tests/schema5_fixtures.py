@@ -70,6 +70,14 @@ def interval_coverage_progress(
     )
     observation_records = leaves["covered"]
     unique_references = min(1, observation_records)
+    opening_total = 1 if states else None
+    scanned_percent = (
+        round(100.0 * min(unique_references, opening_total) / opening_total, 6)
+        if opening_total
+        else 100.0
+        if opening_total == 0
+        else None
+    )
     progress: dict[str, Any] = {
         "schema_version": 5,
         "strategy": "deadline_interval_coverage_v1",
@@ -162,6 +170,40 @@ def interval_coverage_progress(
             "absent": 0,
             "resolved": unique_references,
         },
+        "competition_progress": {
+            "basis": "cycle_opening_root_total_non_authoritative",
+            "opening_total": opening_total,
+            "opening_evidence": (
+                {
+                    "attempt_no": 1,
+                    "capture_kind": "accepted",
+                    "raw_path": "data/official_warehouse/raw/root-page-one.bin",
+                    "sha256": _sha("root-page-one"),
+                    "observed_at": "2026-07-19T00:05:00+00:00",
+                }
+                if opening_total is not None
+                else None
+            ),
+            "observed_unique": unique_references,
+            "observed_against_opening_total": (
+                min(unique_references, opening_total)
+                if opening_total is not None
+                else 0
+            ),
+            "arrivals_or_drift_beyond_opening_total": (
+                max(0, unique_references - opening_total)
+                if opening_total is not None
+                else 0
+            ),
+            "scanned_percent": scanned_percent,
+            "denominator_authoritative": False,
+            "completion_gate": "coverage.complete",
+        },
+        "official_active_scanned_unique": unique_references,
+        "official_active_scanned_percent": scanned_percent,
+        "official_active_scanned_percent_basis": (
+            "cycle_opening_root_total_non_authoritative"
+        ),
         "snapshot_authoritative": False,
         "instantaneous_snapshot_authoritative": False,
         "union_authoritative": False,

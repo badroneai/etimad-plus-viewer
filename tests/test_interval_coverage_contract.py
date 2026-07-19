@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import sys
 import unittest
 from pathlib import Path
@@ -62,6 +63,49 @@ class IntervalCoverageContractTests(unittest.TestCase):
         self.assertFalse(partial["cycle_terminal"])
         self.assertEqual(terminal_gap["phase"], "complete_with_gaps")
         self.assertTrue(terminal_gap["cycle_terminal"])
+
+    def test_competition_percentage_uses_only_the_non_authoritative_opening_total(
+        self,
+    ) -> None:
+        initial = interval_coverage_progress(())
+        self.assertIsNone(initial["competition_progress"]["opening_total"])
+        self.assertIsNone(initial["official_active_scanned_percent"])
+        assert_active_interval_coverage_contract(initial)
+
+        progress = interval_coverage_progress(("covered",))
+        self.assertEqual(progress["competition_progress"]["scanned_percent"], 100.0)
+        self.assertFalse(
+            progress["competition_progress"]["denominator_authoritative"]
+        )
+        assert_active_interval_coverage_contract(progress)
+
+        forged = deepcopy(progress)
+        forged["competition_progress"]["scanned_percent"] = 50.0
+        with self.assertRaisesRegex(AssertionError, "competition scanned percent"):
+            assert_active_interval_coverage_contract(forged)
+
+        forged_authority = deepcopy(progress)
+        forged_authority["competition_progress"][
+            "denominator_authoritative"
+        ] = True
+        with self.assertRaisesRegex(AssertionError, "cannot be authoritative"):
+            assert_active_interval_coverage_contract(forged_authority)
+
+        missing_terminal_denominator = interval_coverage_progress()
+        missing_terminal_denominator["competition_progress"].update(
+            {
+                "opening_total": None,
+                "opening_evidence": None,
+                "observed_against_opening_total": 0,
+                "arrivals_or_drift_beyond_opening_total": 0,
+                "scanned_percent": None,
+            }
+        )
+        missing_terminal_denominator["official_active_scanned_percent"] = None
+        with self.assertRaisesRegex(AssertionError, "requires a replayed opening"):
+            assert_active_interval_coverage_contract(
+                missing_terminal_denominator
+            )
 
     def test_interval_geometry_and_arithmetic_fail_closed(self) -> None:
         cases = []
