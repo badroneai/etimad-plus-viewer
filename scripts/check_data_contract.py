@@ -238,6 +238,24 @@ def assert_active_scan_progress_contract(progress: object) -> None:
     date_fallback = progress.get("date_fallback")
     if date_fallback is not None:
         assert_active_date_scan_contract(date_fallback)
+        assert isinstance(date_fallback, dict)
+        assert date_fallback["target_count"] == denominator, (
+            "active date scan target cohort differs from active_scan"
+        )
+        assert date_fallback["targets_observed_unique"] == scanned, (
+            "active date scan observed count differs from active_scan"
+        )
+        assert date_fallback["targets_resolved_unique"] == resolved, (
+            "active date scan resolved count differs from active_scan"
+        )
+        assert date_fallback["targets_absent_after_full_partitions"] == absent, (
+            "active date scan absence count differs from active_scan"
+        )
+        assert (
+            isinstance(progress.get("cycle_id"), str)
+            and progress["cycle_id"]
+            and date_fallback.get("cycle_id") == progress["cycle_id"]
+        ), "active date scan cycle differs from active_scan"
     awaiting_date_authority = bool(
         isinstance(date_fallback, dict)
         and not date_fallback.get("completion_authoritative", False)
@@ -274,8 +292,12 @@ def assert_active_date_scan_contract(progress: object) -> None:
     target_count = progress["target_count"]
     observed = progress["targets_observed_unique"]
     resolved = progress["targets_resolved_unique"]
+    absent = progress["targets_absent_after_full_partitions"]
     assert observed <= resolved <= target_count, (
         "active date scan target arithmetic mismatch"
+    )
+    assert absent <= resolved and resolved == observed + absent, (
+        "active date scan observed/absence arithmetic mismatch"
     )
     generation_value = progress.get("generation")
     assert (

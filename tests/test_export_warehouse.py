@@ -630,6 +630,7 @@ class ExportContractTests(unittest.TestCase):
             }
         )
         pending_date_fallback = {
+            "cycle_id": "cycle-test",
             "target_count": 2,
             "targets_observed_unique": 2,
             "targets_resolved_unique": 2,
@@ -657,6 +658,7 @@ class ExportContractTests(unittest.TestCase):
         assert_active_scan_progress_contract(
             {
                 "denominator": 2,
+                "cycle_id": "cycle-test",
                 "targets_scanned_unique": 2,
                 "targets_resolved_unique": 2,
                 "targets_absent_after_full_pass": 0,
@@ -674,6 +676,7 @@ class ExportContractTests(unittest.TestCase):
             assert_active_scan_progress_contract(
                 {
                     "denominator": 2,
+                    "cycle_id": "cycle-test",
                     "targets_scanned_unique": 2,
                     "targets_resolved_unique": 2,
                     "targets_absent_after_full_pass": 0,
@@ -683,6 +686,28 @@ class ExportContractTests(unittest.TestCase):
                     "absence_confirmation_passes": 2,
                     "complete": True,
                     "date_fallback": pending_date_fallback,
+                }
+            )
+        wrong_cohort = {
+            **pending_date_fallback,
+            "target_count": 1,
+            "targets_observed_unique": 1,
+            "targets_resolved_unique": 1,
+        }
+        with self.assertRaisesRegex(AssertionError, "target cohort differs"):
+            assert_active_scan_progress_contract(
+                {
+                    "denominator": 2,
+                    "cycle_id": "cycle-test",
+                    "targets_scanned_unique": 1,
+                    "targets_resolved_unique": 1,
+                    "targets_absent_after_full_pass": 0,
+                    "targets_remaining": 1,
+                    "scanned_percent": 50.0,
+                    "coverage_percent": 50.0,
+                    "absence_confirmation_passes": 2,
+                    "complete": False,
+                    "date_fallback": wrong_cohort,
                 }
             )
         with self.assertRaisesRegex(AssertionError, "remaining arithmetic"):
@@ -741,6 +766,7 @@ class ExportContractTests(unittest.TestCase):
 
     def test_active_date_partition_contract_requires_exact_union(self):
         progress = {
+            "cycle_id": "cycle-test",
             "target_count": 2,
             "targets_observed_unique": 2,
             "targets_resolved_unique": 2,
@@ -788,10 +814,20 @@ class ExportContractTests(unittest.TestCase):
             "partition_authoritative": False,
             "completion_authoritative": False,
             "absence_authoritative": True,
+            "targets_observed_unique": 1,
+            "targets_observed_percent": 50.0,
             "targets_absent_after_full_partitions": 1,
         }
         with self.assertRaisesRegex(AssertionError, "absence lacks"):
             assert_active_date_scan_contract(absence_without_authority)
+
+        impossible_absence = {
+            **progress,
+            "targets_absent_after_full_partitions": 99,
+            "absence_authoritative": True,
+        }
+        with self.assertRaisesRegex(AssertionError, "observed/absence arithmetic"):
+            assert_active_date_scan_contract(impossible_absence)
 
         incomplete_authority = {**progress, "completion_authoritative": False}
         with self.assertRaisesRegex(AssertionError, "completion authority arithmetic"):
