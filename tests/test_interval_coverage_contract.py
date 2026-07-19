@@ -772,24 +772,6 @@ class IntervalCoverageContractTests(unittest.TestCase):
             ("malformed history", malformed_history, "history sequence mismatch")
         )
 
-        driftless_generation_three = deepcopy(valid_generation_three)
-        driftless_history = driftless_generation_three["single_day_refinement"][
-            "temporal_reconciliation"
-        ]["entries"][0]["generation_history"]
-        driftless_history[1].update(
-            {
-                key: driftless_history[0][key]
-                for key in ("union_unique", "union_sha256", "bijection_sha256")
-            }
-        )
-        cases.append(
-            (
-                "driftless generation three",
-                driftless_generation_three,
-                "history has no drift",
-            )
-        )
-
         stale_baseline = deepcopy(valid_generation_three)
         stale_baseline["single_day_refinement"]["temporal_reconciliation"][
             "entries"
@@ -1014,6 +996,22 @@ class IntervalCoverageContractTests(unittest.TestCase):
         for name, progress, message in cases:
             with self.subTest(name=name), self.assertRaisesRegex(AssertionError, message):
                 assert_active_interval_coverage_contract(progress)
+
+    def test_temporal_reconciliation_allows_driftless_generation_3_history(self) -> None:
+        progress = interval_coverage_progress()
+        progress["single_day_refinement"]["temporal_reconciliation"] = (
+            self._sealed_temporal_reconciliation(generation=3)
+        )
+        driftless_history = progress["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["generation_history"]
+        driftless_history[1].update(
+            {
+                key: driftless_history[0][key]
+                for key in ("union_unique", "union_sha256", "bijection_sha256")
+            }
+        )
+        assert_active_interval_coverage_contract(progress)
 
     def test_terminal_refinement_rejects_unfinished_or_conflicting_state(
         self,
