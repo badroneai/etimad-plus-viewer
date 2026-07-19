@@ -2232,6 +2232,68 @@ def assert_active_interval_coverage_contract(
         "observed_at_least_once_during_cell_observation_intervals"
     ), "schema-5 observation semantics are ambiguous"
 
+    competition = progress.get("competition_progress")
+    assert isinstance(competition, dict), (
+        "schema-5 active competition progress is missing"
+    )
+    assert competition.get("basis") == (
+        "cycle_opening_root_total_non_authoritative"
+    ), "schema-5 active competition progress basis is invalid"
+    assert competition.get("denominator_authoritative") is False, (
+        "schema-5 opening competition denominator cannot be authoritative"
+    )
+    assert competition.get("completion_gate") == "coverage.complete", (
+        "schema-5 competition percentage cannot become the completion gate"
+    )
+    opening_total = competition.get("opening_total")
+    assert opening_total is None or _nonnegative_integer(opening_total), (
+        "schema-5 opening competition total is invalid"
+    )
+    observed_unique = observations["unique_references"]
+    assert competition.get("observed_unique") == observed_unique, (
+        "schema-5 competition observation count mismatch"
+    )
+    expected_against_opening = (
+        min(observed_unique, opening_total) if opening_total is not None else 0
+    )
+    expected_beyond_opening = (
+        max(0, observed_unique - opening_total)
+        if opening_total is not None
+        else 0
+    )
+    assert competition.get("observed_against_opening_total") == (
+        expected_against_opening
+    ), "schema-5 opening-denominator observation arithmetic mismatch"
+    assert competition.get("arrivals_or_drift_beyond_opening_total") == (
+        expected_beyond_opening
+    ), "schema-5 opening-denominator drift arithmetic mismatch"
+    expected_competition_percent = (
+        100.0 * expected_against_opening / opening_total
+        if opening_total
+        else 100.0
+        if opening_total == 0
+        else None
+    )
+    if expected_competition_percent is None:
+        assert competition.get("scanned_percent") is None, (
+            "schema-5 competition percentage requires an opening denominator"
+        )
+    else:
+        _assert_percentage(
+            competition.get("scanned_percent"),
+            expected_competition_percent,
+            label="schema-5 active competition scanned percent",
+        )
+    assert progress.get("official_active_scanned_unique") == observed_unique, (
+        "schema-5 official active scanned count mismatch"
+    )
+    assert progress.get("official_active_scanned_percent") == (
+        competition.get("scanned_percent")
+    ), "schema-5 official active percentage mirror mismatch"
+    assert progress.get("official_active_scanned_percent_basis") == (
+        competition.get("basis")
+    ), "schema-5 official active percentage basis mismatch"
+
     window = progress.get("observation_window")
     assert isinstance(window, dict), "schema-5 observation window is missing"
     started_at = parse_iso_datetime(window.get("started_at"))
