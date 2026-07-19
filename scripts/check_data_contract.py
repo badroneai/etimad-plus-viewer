@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 import hashlib
 import json
 import re
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -32,6 +33,18 @@ AWARDED_INDEX_DESCRIPTOR_MAX_BYTES = 1024 * 1024
 AWARDED_INDEX_PART_MAX_BYTES = 5 * 1024 * 1024
 OFFICIAL_COMPONENT_SOURCE_ID = "etimad_official_components"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
+ACTIVE_DATE_DOMAIN_START = "1900-01-01"
+ACTIVE_DATE_DOMAIN_END = "2100-12-31"
+ACTIVE_LIST_ENDPOINT = (
+    "https://tenders.etimad.sa/Tender/AllSupplierTendersForVisitorAsync"
+)
+ACTIVE_LIST_REQUIRED_PARAMS = {
+    "TenderCategory": "2",
+    "PublishDateId": "1",
+    "SortDirection": "DESC",
+    "Sort": "SubmitionDate",
+    "IsSearch": "true",
+}
 
 
 def assert_awarded_lifecycle_contract(
@@ -191,7 +204,10 @@ def _assert_percentage(value: object, expected: float, *, label: str) -> None:
     )
 
 
-def assert_active_scan_progress_contract(progress: object) -> None:
+def assert_active_scan_progress_contract(
+    progress: object,
+    evidence: object = None,
+) -> None:
     """Validate the resumable active-scan counter arithmetic."""
     assert isinstance(progress, dict), "fetch status active_scan is missing"
     if progress.get("available") is False:
@@ -237,7 +253,7 @@ def assert_active_scan_progress_contract(progress: object) -> None:
         assert remaining == 0, "active_scan is complete with remaining targets"
     date_fallback = progress.get("date_fallback")
     if date_fallback is not None:
-        assert_active_date_scan_contract(date_fallback)
+        assert_active_date_scan_contract(date_fallback, evidence)
         assert isinstance(date_fallback, dict)
         assert date_fallback["target_count"] == denominator, (
             "active date scan target cohort differs from active_scan"
@@ -256,6 +272,13 @@ def assert_active_scan_progress_contract(progress: object) -> None:
             and progress["cycle_id"]
             and date_fallback.get("cycle_id") == progress["cycle_id"]
         ), "active date scan cycle differs from active_scan"
+        if date_fallback.get("schema_version") == 3:
+            assert progress.get("bootstrap") == date_fallback.get("bootstrap"), (
+                "active bootstrap differs between scan ledgers"
+            )
+            assert progress.get("bootstrap_complete") == date_fallback[
+                "bootstrap"
+            ].get("complete"), "active bootstrap completion aliases disagree"
     awaiting_date_authority = bool(
         isinstance(date_fallback, dict)
         and not date_fallback.get("completion_authoritative", False)
@@ -268,8 +291,1598 @@ def assert_active_scan_progress_contract(progress: object) -> None:
         assert progress["complete"], "active_scan reached full coverage without completion"
 
 
-def assert_active_date_scan_contract(progress: object) -> None:
-    """Validate the exhaustive date-partition evidence nested in active scan."""
+def _sha256(value: object, *, label: str) -> str:
+    assert isinstance(value, str) and SHA256_PATTERN.fullmatch(value), (
+        f"{label} SHA-256 is invalid"
+    )
+    return value.lower()
+
+
+def _reference_union_sha256(references: set[str]) -> str:
+    payload = (
+        ("\n".join(sorted(references)) + "\n") if references else ""
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _evidence_references(value: object, *, label: str) -> list[str]:
+    assert isinstance(value, list), f"{label} references are missing"
+    assert all(
+        isinstance(reference, str) and reference
+        for reference in value
+    ), f"{label} contains an invalid reference"
+    assert value == sorted(value), f"{label} references are not sorted"
+    return value
+
+
+def _assert_active_boundary_capture(
+    evidence: object,
+    *,
+    verification_by_path: dict[str, dict],
+    label: str,
+    expected_total: int,
+    expected_reference_sha: str,
+    page_size: int,
+    filtered: bool,
+) -> set[str]:
+    """Replay one page-1 opening/closing RAW-capture descriptor."""
+
+    assert isinstance(evidence, dict), f"{label} evidence is missing"
+    assert evidence.get("status") == 200, f"{label} status is not 200"
+    assert str(evidence.get("content_type") or "").startswith("application/json"), (
+        f"{label} content type is invalid"
+    )
+    assert _nonnegative_integer(evidence.get("bytes")) and evidence["bytes"] > 0, (
+        f"{label} byte count is invalid"
+    )
+    assert evidence.get("total_count") == expected_total, (
+        f"{label} total count mismatch"
+    )
+    references_value = evidence.get("references")
+    assert isinstance(references_value, list) and all(
+        isinstance(reference, str) and reference
+        for reference in references_value
+    ), f"{label} references are invalid"
+    references = [str(reference) for reference in references_value]
+    reference_set = set(references)
+    assert len(references) == len(reference_set), (
+        f"{label} contains duplicate references"
+    )
+    assert evidence.get("records") == len(references), (
+        f"{label} record/reference count mismatch"
+    )
+    assert len(references) == min(page_size, expected_total), (
+        f"{label} page-1 cardinality mismatch"
+    )
+    capture_reference_sha = _reference_union_sha256(reference_set)
+    assert capture_reference_sha == expected_reference_sha, (
+        f"{label} references do not match the boundary head"
+    )
+    assert _sha256(
+        evidence.get("reference_sha256"), label=f"{label} reference"
+    ) == expected_reference_sha, f"{label} reference hash mismatch"
+    assert isinstance(evidence.get("raw_path"), str) and evidence["raw_path"], (
+        f"{label} raw path is missing"
+    )
+    _assert_raw_verification_pointer(
+        verification_by_path,
+        evidence.get("raw_path"),
+        evidence.get("sha256"),
+        label=label,
+        expected_bytes=evidence.get("bytes"),
+    )
+
+    capture_url = evidence.get("url")
+    assert isinstance(capture_url, str) and capture_url, f"{label} URL is missing"
+    actual = urlsplit(capture_url)
+    expected_endpoint = urlsplit(ACTIVE_LIST_ENDPOINT)
+    assert (actual.scheme, actual.netloc, actual.path) == (
+        expected_endpoint.scheme,
+        expected_endpoint.netloc,
+        expected_endpoint.path,
+    ), f"{label} endpoint mismatch"
+    query = parse_qs(actual.query, keep_blank_values=True)
+    expected_query = {
+        **ACTIVE_LIST_REQUIRED_PARAMS,
+        "PageSize": str(page_size),
+        "PageNumber": "1",
+    }
+    if filtered:
+        expected_query.update(
+            {
+                "FromLastOfferPresentationDateString": "01/01/1900",
+                "ToLastOfferPresentationDateString": "31/12/2100",
+            }
+        )
+    unexpected = set(query) - set(expected_query) - {"_"}
+    assert not unexpected, f"{label} query has unexpected parameters"
+    for key, value in expected_query.items():
+        assert query.get(key) == [value], f"{label} query mismatch: {key}"
+    return reference_set
+
+
+def _assert_raw_verification_pointer(
+    verification_by_path: dict[str, dict],
+    raw_path: object,
+    sha256: object,
+    *,
+    label: str,
+    expected_bytes: object = None,
+) -> None:
+    raw_text = str(raw_path or "").strip()
+    path = Path(raw_text)
+    assert raw_text and not path.is_absolute() and ".." not in path.parts, (
+        f"{label} RAW path is unsafe or missing"
+    )
+    descriptor = verification_by_path.get(raw_text)
+    assert isinstance(descriptor, dict), f"{label} lacks export-time byte verification"
+    assert descriptor.get("sha256") == _sha256(sha256, label=f"{label} RAW"), (
+        f"{label} RAW verification hash mismatch"
+    )
+    assert _nonnegative_integer(descriptor.get("bytes")), (
+        f"{label} RAW verification byte count is invalid"
+    )
+    if expected_bytes is not None:
+        assert descriptor["bytes"] == expected_bytes, (
+            f"{label} RAW verification byte count mismatch"
+        )
+
+
+def _assert_active_generation_proof(
+    proof: object,
+    *,
+    bootstrap_refs: set[str],
+    bootstrap_sha: str,
+    bootstrap_head_sha: str,
+    bootstrap_total: int,
+    bootstrap_pass: int,
+    page_size: int,
+    verification_by_path: dict[str, dict],
+) -> tuple[int, int, str]:
+    """Replay one append-only closed-generation proof from its embedded evidence."""
+
+    assert isinstance(proof, dict), "active generation proof row is invalid"
+    for key in (
+        "bootstrap_pass_number",
+        "generation",
+        "convergence_ordinal",
+        "date_unique",
+        "residual_unique",
+        "union_unique",
+        "opening_filtered_total_count",
+        "closing_filtered_total_count",
+        "opening_boundary_total_count",
+        "closing_boundary_total_count",
+    ):
+        assert _nonnegative_integer(proof.get(key)), (
+            f"active generation proof {key} is invalid"
+        )
+    assert proof["bootstrap_pass_number"] == bootstrap_pass, (
+        "active generation proof bootstrap pass mismatch"
+    )
+    assert proof["generation"] >= 1, "active generation proof generation is invalid"
+    assert proof["convergence_ordinal"] >= 1, (
+        "active generation proof convergence ordinal is invalid"
+    )
+    for key in (
+        "date_union_sha256",
+        "residual_union_sha256",
+        "union_sha256",
+        "bootstrap_union_sha256",
+        "opening_filtered_ref_sha256",
+        "closing_filtered_ref_sha256",
+        "opening_boundary_ref_sha256",
+        "closing_boundary_ref_sha256",
+    ):
+        _sha256(proof.get(key), label=f"active generation proof {key}")
+
+    date_refs = _evidence_references(
+        proof.get("date_references"), label="active generation proof date"
+    )
+    residual_refs = _evidence_references(
+        proof.get("residual_references"), label="active generation proof residual"
+    )
+    union_refs = _evidence_references(
+        proof.get("union_references"), label="active generation proof union"
+    )
+    date_set = set(date_refs)
+    residual_set = set(residual_refs)
+    union_set = set(union_refs)
+    assert len(date_refs) == len(date_set), (
+        "active generation proof date references contain duplicates"
+    )
+    assert len(residual_refs) == len(residual_set), (
+        "active generation proof residual references contain duplicates"
+    )
+    assert len(union_refs) == len(union_set), (
+        "active generation proof union references contain duplicates"
+    )
+    assert proof["date_unique"] == len(date_set), (
+        "active generation proof date count mismatch"
+    )
+    assert proof["opening_filtered_total_count"] == proof["date_unique"], (
+        "active generation proof filtered total differs from date union"
+    )
+    assert proof["residual_unique"] == len(residual_set), (
+        "active generation proof residual count mismatch"
+    )
+    assert proof["union_unique"] == len(union_set), (
+        "active generation proof union count mismatch"
+    )
+    assert _reference_union_sha256(date_set) == proof["date_union_sha256"], (
+        "active generation proof date hash mismatch"
+    )
+    assert _reference_union_sha256(residual_set) == proof["residual_union_sha256"], (
+        "active generation proof residual hash mismatch"
+    )
+    proof_union_sha = _reference_union_sha256(union_set)
+    assert proof_union_sha == proof["union_sha256"], (
+        "active generation proof union hash mismatch"
+    )
+    assert date_set.isdisjoint(residual_set), (
+        "active generation proof date/residual sets overlap"
+    )
+    assert date_set | residual_set == union_set, (
+        "active generation proof union is not D plus R"
+    )
+    assert residual_set == bootstrap_refs - date_set, (
+        "active generation proof residual is not U minus D"
+    )
+    assert union_set == bootstrap_refs, (
+        "active generation proof union does not replay to U"
+    )
+    assert proof["bootstrap_union_sha256"] == bootstrap_sha, (
+        "active generation proof bootstrap hash mismatch"
+    )
+
+    assert proof["opening_filtered_total_count"] == proof[
+        "closing_filtered_total_count"
+    ], "active generation proof filtered total changed at close"
+    assert proof["opening_filtered_ref_sha256"] == proof[
+        "closing_filtered_ref_sha256"
+    ], "active generation proof filtered head changed at close"
+    assert proof["opening_boundary_total_count"] == bootstrap_total, (
+        "active generation proof opening boundary total mismatch"
+    )
+    assert proof["closing_boundary_total_count"] == bootstrap_total, (
+        "active generation proof closing boundary total mismatch"
+    )
+    assert proof["opening_boundary_ref_sha256"] == bootstrap_head_sha, (
+        "active generation proof opening boundary head mismatch"
+    )
+    assert proof["closing_boundary_ref_sha256"] == bootstrap_head_sha, (
+        "active generation proof closing boundary head mismatch"
+    )
+    boundary_evidence = proof.get("boundary_evidence")
+    assert isinstance(boundary_evidence, dict), (
+        "active generation proof boundary evidence is missing"
+    )
+    opening_evidence = boundary_evidence.get("opening")
+    closing_evidence = boundary_evidence.get("closing")
+    assert isinstance(opening_evidence, dict) and isinstance(closing_evidence, dict), (
+        "active generation proof opening/closing evidence is missing"
+    )
+    opening_filtered_refs = _assert_active_boundary_capture(
+        opening_evidence.get("filtered"),
+        verification_by_path=verification_by_path,
+        label="active generation opening filtered boundary",
+        expected_total=proof["opening_filtered_total_count"],
+        expected_reference_sha=proof["opening_filtered_ref_sha256"],
+        page_size=page_size,
+        filtered=True,
+    )
+    closing_filtered_refs = _assert_active_boundary_capture(
+        closing_evidence.get("filtered"),
+        verification_by_path=verification_by_path,
+        label="active generation closing filtered boundary",
+        expected_total=proof["closing_filtered_total_count"],
+        expected_reference_sha=proof["closing_filtered_ref_sha256"],
+        page_size=page_size,
+        filtered=True,
+    )
+    opening_unfiltered_refs = _assert_active_boundary_capture(
+        opening_evidence.get("unfiltered"),
+        verification_by_path=verification_by_path,
+        label="active generation opening unfiltered boundary",
+        expected_total=proof["opening_boundary_total_count"],
+        expected_reference_sha=proof["opening_boundary_ref_sha256"],
+        page_size=page_size,
+        filtered=False,
+    )
+    closing_unfiltered_refs = _assert_active_boundary_capture(
+        closing_evidence.get("unfiltered"),
+        verification_by_path=verification_by_path,
+        label="active generation closing unfiltered boundary",
+        expected_total=proof["closing_boundary_total_count"],
+        expected_reference_sha=proof["closing_boundary_ref_sha256"],
+        page_size=page_size,
+        filtered=False,
+    )
+    assert opening_filtered_refs == closing_filtered_refs, (
+        "active generation filtered boundary reference sets changed"
+    )
+    assert opening_filtered_refs <= date_set, (
+        "active generation filtered boundary references are outside D"
+    )
+    assert opening_unfiltered_refs == closing_unfiltered_refs, (
+        "active generation unfiltered boundary reference sets changed"
+    )
+    assert opening_unfiltered_refs <= bootstrap_refs, (
+        "active generation unfiltered boundary references are outside U"
+    )
+
+    range_rows = proof.get("range_generations")
+    assert isinstance(range_rows, list), "active generation proof ranges are missing"
+    range_by_id: dict[str, dict] = {}
+    geometry_cursor = date.fromisoformat(ACTIVE_DATE_DOMAIN_START)
+    geometry_end = date.fromisoformat(ACTIVE_DATE_DOMAIN_END)
+    for range_row in range_rows:
+        assert isinstance(range_row, dict), "active generation proof range is invalid"
+        range_id = range_row.get("range_id")
+        assert isinstance(range_id, str) and range_id and range_id not in range_by_id, (
+            "active generation proof range id is invalid or duplicated"
+        )
+        range_by_id[range_id] = range_row
+        assert _nonnegative_integer(range_row.get("generation")) and range_row[
+            "generation"
+        ] >= 1, "active generation proof range generation is invalid"
+        assert _nonnegative_integer(range_row.get("total_count")), (
+            "active generation proof range total is invalid"
+        )
+        try:
+            from_day = date.fromisoformat(str(range_row.get("from_day")))
+            to_day = date.fromisoformat(str(range_row.get("to_day")))
+        except ValueError as exc:
+            raise AssertionError("active generation proof range date is invalid") from exc
+        assert from_day == geometry_cursor and from_day <= to_day, (
+            "active generation proof range geometry has a gap or overlap"
+        )
+        geometry_cursor = to_day + timedelta(days=1)
+    assert geometry_cursor == geometry_end + timedelta(days=1), (
+        "active generation proof ranges do not cover the fixed domain"
+    )
+
+    page_rows = proof.get("page_evidence")
+    assert isinstance(page_rows, list), "active generation proof pages are missing"
+    pages_by_range: dict[str, list[dict]] = {}
+    replayed_date_refs: list[str] = []
+    page_keys: set[tuple[str, int]] = set()
+    for page in page_rows:
+        assert isinstance(page, dict), "active generation proof page is invalid"
+        range_id = page.get("range_id")
+        assert isinstance(range_id, str) and range_id in range_by_id, (
+            "active generation proof page has an unknown range"
+        )
+        assert page.get("generation") == range_by_id[range_id]["generation"], (
+            "active generation proof page generation mismatch"
+        )
+        page_number_value = page.get("page_number")
+        records_value = page.get("records")
+        assert (
+            isinstance(page_number_value, int)
+            and not isinstance(page_number_value, bool)
+            and page_number_value >= 1
+        ), (
+            "active generation proof page number is invalid"
+        )
+        assert (
+            isinstance(records_value, int)
+            and not isinstance(records_value, bool)
+            and records_value >= 0
+        ), (
+            "active generation proof page records are invalid"
+        )
+        page_number = int(page_number_value)
+        records = int(records_value)
+        assert page.get("total_count") == range_by_id[range_id]["total_count"], (
+            "active generation proof page total mismatch"
+        )
+        page_key = (range_id, page_number)
+        assert page_key not in page_keys, "active generation proof page is duplicated"
+        page_keys.add(page_key)
+        references = _evidence_references(
+            page.get("references"),
+            label=f"active generation proof page {range_id}/{page_number}",
+        )
+        assert len(references) == records and len(references) == len(set(references)), (
+            "active generation proof page reference count is invalid"
+        )
+        assert isinstance(page.get("raw_path"), str) and page["raw_path"], (
+            "active generation proof page raw path is missing"
+        )
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            page.get("raw_path"),
+            page.get("sha256"),
+            label="active generation proof page",
+        )
+        replayed_date_refs.extend(references)
+        pages_by_range.setdefault(range_id, []).append(page)
+    assert len(replayed_date_refs) == len(set(replayed_date_refs)), (
+        "active generation proof pages contain duplicate references"
+    )
+    assert set(replayed_date_refs) == date_set, (
+        "active generation proof pages do not replay to D"
+    )
+    assert set(pages_by_range) == set(range_by_id), (
+        "active generation proof range has no page evidence"
+    )
+    for range_id, pages in pages_by_range.items():
+        total = range_by_id[range_id]["total_count"]
+        expected_pages = max(1, (total + page_size - 1) // page_size)
+        assert [page["page_number"] for page in pages] == list(
+            range(1, expected_pages + 1)
+        ), "active generation proof page sequence is incomplete"
+        for page in pages:
+            expected_records = min(
+                page_size,
+                max(0, total - (page["page_number"] - 1) * page_size),
+            )
+            assert page["records"] == expected_records, (
+                "active generation proof page cardinality mismatch"
+            )
+
+    residual_rows = proof.get("residual_evidence")
+    assert isinstance(residual_rows, list), (
+        "active generation proof residual evidence is missing"
+    )
+    replayed_residual: list[str] = []
+    for row in residual_rows:
+        assert isinstance(row, dict), "active generation proof residual row is invalid"
+        ref = row.get("reference_number")
+        assert isinstance(ref, str) and ref, (
+            "active generation proof residual reference is invalid"
+        )
+        assert row.get("state") == "verified_active" and row.get("status_id") == 4, (
+            "active generation proof residual is not verified status 4"
+        )
+        assert isinstance(row.get("raw_path"), str) and row["raw_path"], (
+            "active generation proof residual raw path is missing"
+        )
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            row.get("raw_path"),
+            row.get("sha256"),
+            label="active generation proof residual",
+        )
+        assert isinstance(row.get("run_id"), str) and row["run_id"], (
+            "active generation proof residual run id is missing"
+        )
+        assert isinstance(row.get("checked_at"), str) and row["checked_at"], (
+            "active generation proof residual checked_at is missing"
+        )
+        replayed_residual.append(ref)
+    assert len(replayed_residual) == len(set(replayed_residual)), (
+        "active generation proof residual evidence is duplicated"
+    )
+    assert set(replayed_residual) == residual_set, (
+        "active generation proof residual evidence does not replay to R"
+    )
+    assert isinstance(proof.get("run_id"), str) and proof["run_id"], (
+        "active generation proof run id is missing"
+    )
+    assert isinstance(proof.get("closed_at"), str) and proof["closed_at"], (
+        "active generation proof closed_at is missing"
+    )
+    return proof["generation"], proof["convergence_ordinal"], proof_union_sha
+
+
+def assert_active_hybrid_scan_contract(
+    progress: dict,
+    evidence: object,
+) -> None:
+    """Validate schema-3 bootstrap + date partition + residual union authority."""
+
+    assert progress.get("mode") == "official_active_hybrid_union", (
+        "schema-3 active scan mode mismatch"
+    )
+    for key in (
+        "target_count",
+        "targets_observed_unique",
+        "targets_resolved_unique",
+        "targets_absent_after_full_partitions",
+        "ranges_total",
+        "ranges_pending",
+        "ranges_split",
+        "ranges_exact",
+        "ranges_blocked_single_day",
+        "official_active_scanned_unique",
+        "official_active_scanned_lifetime_high_watermark",
+        "official_active_generation_scanned_unique",
+        "accepted_pages_current_generation",
+        "accepted_records_current_generation",
+        "partition_duplicate_records",
+        "leaf_integrity_error_count",
+        "range_geometry_error_count",
+    ):
+        assert _nonnegative_integer(progress.get(key)), (
+            f"schema-3 active date scan {key} is invalid"
+        )
+    target_count = progress["target_count"]
+    observed = progress["targets_observed_unique"]
+    resolved = progress["targets_resolved_unique"]
+    absent = progress["targets_absent_after_full_partitions"]
+    assert observed <= resolved <= target_count, (
+        "schema-3 active date target arithmetic mismatch"
+    )
+    assert resolved == observed + absent, (
+        "schema-3 active date observed/absence arithmetic mismatch"
+    )
+    _assert_percentage(
+        progress.get("targets_observed_percent"),
+        observed * 100.0 / target_count if target_count else 0.0,
+        label="schema-3 active date targets_observed_percent",
+    )
+    for key in (
+        "root_domain_fixed",
+        "domain_matches_unfiltered_boundary",
+        "unfiltered_boundary_matches_bootstrap",
+        "closing_boundary_matches",
+        "date_partition_complete",
+        "date_partition_authoritative",
+        "union_authoritative",
+        "absence_authoritative",
+        "completion_authoritative",
+    ):
+        assert isinstance(progress.get(key), bool), (
+            f"schema-3 active date scan {key} is invalid"
+        )
+    generation = progress.get("generation")
+    assert (
+        isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation >= 1
+    ), "schema-3 active scan generation is invalid"
+    assert isinstance(evidence, dict), "schema-3 active scan evidence asset is missing"
+    assert evidence.get("schema_version") == 1, (
+        "active scan authority evidence schema mismatch"
+    )
+    assert evidence.get("cycle_id") == progress.get("cycle_id"), (
+        "active scan authority evidence cycle mismatch"
+    )
+    assert evidence.get("generation") == generation, (
+        "active scan authority evidence generation mismatch"
+    )
+    raw_verification = evidence.get("raw_verification")
+    assert isinstance(raw_verification, dict), (
+        "active scan export-time RAW verification is missing"
+    )
+    assert raw_verification.get("mode") == "export_time_official_warehouse_bytes", (
+        "active scan RAW verification mode mismatch"
+    )
+    raw_files = raw_verification.get("files")
+    assert isinstance(raw_files, list), "active scan RAW verification files are missing"
+    verification_by_path: dict[str, dict] = {}
+    for descriptor in raw_files:
+        assert isinstance(descriptor, dict), (
+            "active scan RAW verification descriptor is invalid"
+        )
+        raw_path = descriptor.get("raw_path")
+        assert isinstance(raw_path, str) and raw_path, (
+            "active scan RAW verification path is missing"
+        )
+        path = Path(raw_path)
+        assert not path.is_absolute() and ".." not in path.parts, (
+            "active scan RAW verification path is unsafe"
+        )
+        assert raw_path not in verification_by_path, (
+            "active scan RAW verification path is duplicated"
+        )
+        _sha256(descriptor.get("sha256"), label="active scan RAW verification")
+        assert _nonnegative_integer(descriptor.get("bytes")), (
+            "active scan RAW verification byte count is invalid"
+        )
+        verification_by_path[raw_path] = descriptor
+    assert raw_verification.get("verified_files") == len(raw_files), (
+        "active scan RAW verification file count mismatch"
+    )
+    assert raw_verification.get("verified_bytes") == sum(
+        descriptor["bytes"] for descriptor in raw_files
+    ), "active scan RAW verification byte total mismatch"
+    assert list(verification_by_path) == sorted(verification_by_path), (
+        "active scan RAW verification descriptors are not sorted"
+    )
+
+    evidence_asset = progress.get("evidence_asset")
+    assert isinstance(evidence_asset, dict), (
+        "schema-3 active scan evidence descriptor is missing"
+    )
+    assert evidence_asset.get("schema_version") == 1, (
+        "schema-3 active scan evidence descriptor schema mismatch"
+    )
+    assert evidence_asset.get("file") == "active_scan_authority.json", (
+        "schema-3 active scan evidence descriptor path mismatch"
+    )
+    _sha256(
+        evidence_asset.get("sha256"),
+        label="active scan evidence descriptor",
+    )
+    assert _nonnegative_integer(evidence_asset.get("bytes")) and evidence_asset["bytes"] > 0, (
+        "active scan evidence descriptor byte count is invalid"
+    )
+
+    bootstrap = progress.get("bootstrap")
+    bootstrap_evidence = evidence.get("bootstrap")
+    assert isinstance(bootstrap, dict), "schema-3 active bootstrap status is missing"
+    assert isinstance(bootstrap_evidence, dict), (
+        "schema-3 active bootstrap evidence is missing"
+    )
+    for key in (
+        "pass_number",
+        "total_count",
+        "page_size",
+        "expected_pages",
+        "pages_committed",
+        "page_hole_count",
+        "records",
+        "unique_refs",
+        "duplicate_records",
+        "integrity_error_count",
+    ):
+        assert _nonnegative_integer(bootstrap.get(key)), (
+            f"active bootstrap {key} is invalid"
+        )
+    assert bootstrap["pass_number"] >= 1, "active bootstrap pass_number is invalid"
+    assert bootstrap["page_size"] >= 1, "active bootstrap page_size is invalid"
+    expected_pages = max(
+        1,
+        (bootstrap["total_count"] + bootstrap["page_size"] - 1)
+        // bootstrap["page_size"],
+    )
+    assert bootstrap["expected_pages"] == expected_pages, (
+        "active bootstrap expected page arithmetic mismatch"
+    )
+    assert bootstrap["pages_committed"] <= expected_pages, (
+        "active bootstrap committed pages exceed boundary"
+    )
+    assert bootstrap.get("state") in {"scanning", "closing_boundary", "complete"}, (
+        "active bootstrap state is invalid"
+    )
+    assert isinstance(bootstrap.get("complete"), bool), (
+        "active bootstrap complete flag is invalid"
+    )
+    bootstrap_refs = _evidence_references(
+        bootstrap_evidence.get("references"),
+        label="active bootstrap",
+    )
+    bootstrap_ref_set = set(bootstrap_refs)
+    bootstrap_duplicates = len(bootstrap_refs) - len(bootstrap_ref_set)
+    assert bootstrap["records"] == len(bootstrap_refs), (
+        "active bootstrap record/evidence count mismatch"
+    )
+    assert bootstrap["unique_refs"] == len(bootstrap_ref_set), (
+        "active bootstrap unique/evidence count mismatch"
+    )
+    assert bootstrap["duplicate_records"] == bootstrap_duplicates, (
+        "active bootstrap duplicate arithmetic mismatch"
+    )
+    bootstrap_sha = _reference_union_sha256(bootstrap_ref_set)
+    assert _sha256(
+        bootstrap_evidence.get("union_sha256"),
+        label="active bootstrap evidence union",
+    ) == bootstrap_sha, "active bootstrap evidence union hash mismatch"
+    assert _sha256(
+        bootstrap.get("union_sha256"),
+        label="active bootstrap status union",
+    ) == bootstrap_sha, "active bootstrap status union hash mismatch"
+    assert bootstrap_evidence.get("pass_number") == bootstrap["pass_number"], (
+        "active bootstrap evidence pass mismatch"
+    )
+    bootstrap_pages = bootstrap_evidence.get("pages")
+    assert isinstance(bootstrap_pages, list), "active bootstrap page evidence is missing"
+    page_numbers: list[int] = []
+    page_records = 0
+    page_references: list[str] = []
+    first_page_references: list[str] = []
+    for page in bootstrap_pages:
+        assert isinstance(page, dict), "active bootstrap page evidence is invalid"
+        page_number = page.get("page_number")
+        records = page.get("records")
+        assert (
+            isinstance(page_number, int)
+            and not isinstance(page_number, bool)
+            and page_number >= 1
+        ), (
+            "active bootstrap page number is invalid"
+        )
+        assert isinstance(records, int) and not isinstance(records, bool) and records >= 0, (
+            "active bootstrap page records are invalid"
+        )
+        page_number = int(page_number)
+        records = int(records)
+        assert page.get("total_count") == bootstrap["total_count"], (
+            "active bootstrap page total changed"
+        )
+        expected_page_records = min(
+            bootstrap["page_size"],
+            max(
+                0,
+                bootstrap["total_count"]
+                - (page_number - 1) * bootstrap["page_size"],
+            ),
+        )
+        assert records == expected_page_records, (
+            "active bootstrap page cardinality mismatch"
+        )
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            page.get("raw_path"),
+            page.get("sha256"),
+            label=f"active bootstrap page {page_number}",
+        )
+        references_value = page.get("references")
+        assert isinstance(references_value, list) and all(
+            isinstance(reference, str) and reference
+            for reference in references_value
+        ), f"active bootstrap page {page_number} references are invalid"
+        references = [str(reference) for reference in references_value]
+        assert len(references) == records, (
+            "active bootstrap page reference/record mismatch"
+        )
+        assert len(references) == len(set(references)), (
+            "active bootstrap page contains duplicate references"
+        )
+        page_references.extend(references)
+        if page_number == 1:
+            first_page_references = references
+        page_numbers.append(page_number)
+        page_records += records
+    assert page_numbers == sorted(page_numbers), (
+        "active bootstrap page evidence is not ordered"
+    )
+    assert len(page_numbers) == len(set(page_numbers)), (
+        "active bootstrap page evidence contains duplicate pages"
+    )
+    assert bootstrap["pages_committed"] == len(page_numbers), (
+        "active bootstrap committed page/evidence mismatch"
+    )
+    assert bootstrap["records"] == page_records, (
+        "active bootstrap page record arithmetic mismatch"
+    )
+    assert sorted(page_references) == bootstrap_refs, (
+        "active bootstrap flattened page references mismatch"
+    )
+    bootstrap_head_sha = _reference_union_sha256(set(first_page_references))
+    assert _sha256(
+        bootstrap_evidence.get("head_ref_sha256"),
+        label="active bootstrap evidence head",
+    ) == bootstrap_head_sha, "active bootstrap evidence head hash mismatch"
+    assert _sha256(
+        bootstrap.get("head_ref_sha256"),
+        label="active bootstrap status head",
+    ) == bootstrap_head_sha, "active bootstrap status head hash mismatch"
+    page_holes = bootstrap.get("page_holes")
+    assert isinstance(page_holes, list) and all(
+        isinstance(page, int) and not isinstance(page, bool) and page >= 1
+        for page in page_holes
+    ), "active bootstrap page_holes is invalid"
+    assert page_holes == sorted(set(page_holes)), (
+        "active bootstrap page_holes is duplicate or unsorted"
+    )
+    expected_holes = [
+        page for page in range(1, expected_pages + 1) if page not in page_numbers
+    ]
+    assert page_holes == expected_holes, "active bootstrap page hole ledger mismatch"
+    assert bootstrap["page_hole_count"] == len(page_holes), (
+        "active bootstrap page hole count mismatch"
+    )
+    expected_bootstrap_complete = bool(
+        bootstrap.get("state") == "complete"
+        and bootstrap["pages_committed"] == expected_pages
+        and page_numbers == list(range(1, expected_pages + 1))
+        and bootstrap["page_hole_count"] == 0
+        and bootstrap["records"] == bootstrap["total_count"]
+        and bootstrap["unique_refs"] == bootstrap["total_count"]
+        and bootstrap["duplicate_records"] == 0
+        and bootstrap["integrity_error_count"] == 0
+    )
+    assert bootstrap["complete"] == expected_bootstrap_complete, (
+        "active bootstrap completion arithmetic mismatch"
+    )
+
+    date_filtered_total = progress.get("root_filtered_total")
+    assert date_filtered_total is None or _nonnegative_integer(date_filtered_total), (
+        "schema-3 active date root total is invalid"
+    )
+    reported_total = bootstrap["total_count"]
+    generation_scanned = progress.get("official_active_generation_scanned_unique")
+    assert (
+        isinstance(generation_scanned, int)
+        and not isinstance(generation_scanned, bool)
+        and generation_scanned >= 0
+    ), (
+        "schema-3 active date generation count is invalid"
+    )
+    assert generation_scanned <= reported_total, (
+        "schema-3 active hybrid generation exceeds bootstrap total"
+    )
+    reported_scanned = progress["official_active_scanned_unique"]
+    scanned_high_watermark = progress["official_active_scanned_lifetime_high_watermark"]
+    assert reported_scanned <= reported_total, (
+        "schema-3 active hybrid scanned count exceeds bootstrap total"
+    )
+    assert reported_scanned == min(scanned_high_watermark, reported_total), (
+        "schema-3 active hybrid reported/high-watermark mismatch"
+    )
+    assert reported_scanned >= generation_scanned, (
+        "schema-3 active date high-watermark trails its current generation"
+    )
+    _assert_percentage(
+        progress.get("official_active_scanned_percent"),
+        (
+            reported_scanned * 100.0 / reported_total
+            if reported_total
+            else 100.0
+            if progress.get("union_authoritative")
+            else 0.0
+        ),
+        label="schema-3 active date scanned percent",
+    )
+    _assert_percentage(
+        progress.get("official_active_generation_scanned_percent"),
+        (
+            generation_scanned * 100.0 / reported_total
+            if reported_total
+            else 100.0
+            if progress.get("union_authoritative")
+            else 0.0
+        ),
+        label="active date generation scanned percent",
+    )
+    date_evidence = evidence.get("date_partition")
+    assert isinstance(date_evidence, dict), (
+        "schema-3 active date evidence is missing"
+    )
+    assert date_evidence.get("generation") == generation, (
+        "active date evidence generation mismatch"
+    )
+    date_root = date_evidence.get("root")
+    date_ranges = date_evidence.get("ranges")
+    assert isinstance(date_root, dict), "active date root ledger is missing"
+    assert isinstance(date_ranges, list), "active date range ledger is missing"
+    allowed_range_states = {
+        "pending",
+        "pending_page",
+        "split",
+        "leaf_exact",
+        "blocked_single_day",
+        "superseded",
+    }
+    range_by_id: dict[str, dict] = {}
+    leaf_geometry: list[tuple[date, date]] = []
+    root_rows = 0
+    for range_row in date_ranges:
+        assert isinstance(range_row, dict), "active date range row is invalid"
+        range_id = range_row.get("range_id")
+        assert isinstance(range_id, str) and range_id, (
+            "active date range id is invalid"
+        )
+        assert range_id not in range_by_id, "active date range id is duplicated"
+        range_by_id[range_id] = range_row
+        state = range_row.get("state")
+        assert state in allowed_range_states, "active date range state is invalid"
+        depth = range_row.get("depth")
+        range_generation = range_row.get("generation")
+        next_page = range_row.get("next_page")
+        assert _nonnegative_integer(depth), "active date range depth is invalid"
+        assert (
+            isinstance(range_generation, int)
+            and not isinstance(range_generation, bool)
+            and range_generation >= 1
+        ), (
+            "active date range generation is invalid"
+        )
+        assert (
+            isinstance(next_page, int)
+            and not isinstance(next_page, bool)
+            and next_page >= 1
+        ), (
+            "active date range next page is invalid"
+        )
+        total_count = range_row.get("total_count")
+        assert total_count is None or _nonnegative_integer(total_count), (
+            "active date range total is invalid"
+        )
+        try:
+            from_day = date.fromisoformat(str(range_row.get("from_day")))
+            to_day = date.fromisoformat(str(range_row.get("to_day")))
+        except ValueError as exc:
+            raise AssertionError("active date range geometry date is invalid") from exc
+        assert from_day <= to_day, "active date range has reversed geometry"
+        if range_row.get("parent_range_id") is None:
+            root_rows += 1
+            assert range_id == date_root.get("range_id"), (
+                "active date root/range ledger mismatch"
+            )
+        else:
+            assert isinstance(range_row.get("parent_range_id"), str), (
+                "active date parent range id is invalid"
+            )
+        if state == "leaf_exact":
+            leaf_geometry.append((from_day, to_day))
+    assert root_rows == 1, "active date range ledger must have one root"
+    assert date_root in date_ranges, "active date root is not present in range ledger"
+    assert len(date_ranges) == progress["ranges_total"], (
+        "active date range count/evidence mismatch"
+    )
+    assert sum(
+        row["state"] in {"pending", "pending_page"} for row in date_ranges
+    ) == progress["ranges_pending"], "active date pending range count mismatch"
+    assert sum(row["state"] == "split" for row in date_ranges) == progress[
+        "ranges_split"
+    ], "active date split range count mismatch"
+    assert sum(row["state"] == "leaf_exact" for row in date_ranges) == progress[
+        "ranges_exact"
+    ], "active date exact range count mismatch"
+    assert sum(
+        row["state"] == "blocked_single_day" for row in date_ranges
+    ) == progress["ranges_blocked_single_day"], (
+        "active date blocked range count mismatch"
+    )
+
+    assert date_root.get("generation") == generation, (
+        "active date root generation mismatch"
+    )
+    assert progress.get("root_from_day") == date_root.get("from_day"), (
+        "active date root start/status mismatch"
+    )
+    assert progress.get("root_to_day") == date_root.get("to_day"), (
+        "active date root end/status mismatch"
+    )
+    assert date_root.get("total_count") == date_filtered_total, (
+        "active date root total/status mismatch"
+    )
+    root_domain_fixed = bool(
+        date_root.get("from_day") == ACTIVE_DATE_DOMAIN_START
+        and date_root.get("to_day") == ACTIVE_DATE_DOMAIN_END
+    )
+    assert progress["root_domain_fixed"] == root_domain_fixed, (
+        "active date fixed-domain flag mismatch"
+    )
+    geometry_errors = 0
+    geometry_cursor = date.fromisoformat(str(date_root["from_day"]))
+    geometry_end = date.fromisoformat(str(date_root["to_day"]))
+    for leaf_from, leaf_to in sorted(leaf_geometry):
+        if leaf_from != geometry_cursor:
+            geometry_errors += 1
+        geometry_cursor = max(geometry_cursor, leaf_to + timedelta(days=1))
+    if geometry_cursor != geometry_end + timedelta(days=1):
+        geometry_errors += 1
+    assert progress["range_geometry_error_count"] == geometry_errors, (
+        "active date range geometry evidence mismatch"
+    )
+
+    for key in (
+        "domain_matches_boundary",
+        "closing_boundary_matches",
+    ):
+        assert isinstance(date_root.get(key), bool), (
+            f"active date root {key} is invalid"
+        )
+    for key in (
+        "boundary_ref_sha256",
+        "closing_boundary_ref_sha256",
+        "opening_filtered_ref_sha256",
+        "closing_filtered_ref_sha256",
+        "convergence_union_sha256",
+    ):
+        value = date_root.get(key)
+        if value is not None:
+            _sha256(value, label=f"active date root {key}")
+    assert date_root.get("scanned_high_watermark") == scanned_high_watermark, (
+        "active date root high-watermark mismatch"
+    )
+    assert date_root.get("bootstrap_pass_number") == bootstrap["pass_number"], (
+        "active date root bootstrap pass mismatch"
+    )
+    boundary_matches_bootstrap = bool(
+        bootstrap["complete"]
+        and date_root.get("bootstrap_pass_number") == bootstrap["pass_number"]
+        and date_root.get("boundary_total_count") == bootstrap["total_count"]
+        and date_root.get("boundary_ref_sha256") == bootstrap_head_sha
+    )
+    assert progress["unfiltered_boundary_matches_bootstrap"] == (
+        boundary_matches_bootstrap
+    ), "active date/bootstrap boundary flag mismatch"
+    domain_matches_boundary = bool(
+        date_root.get("domain_matches_boundary")
+        and date_root.get("boundary_total_count") is not None
+        and date_filtered_total == date_root.get("boundary_total_count")
+    )
+    assert progress["domain_matches_unfiltered_boundary"] == domain_matches_boundary, (
+        "active date/unfiltered domain match flag mismatch"
+    )
+    closing_boundary_matches = bool(
+        date_root.get("closing_boundary_matches")
+        and date_root.get("closing_boundary_generation") == generation
+        and date_root.get("closing_boundary_total_count") == bootstrap["total_count"]
+        and date_root.get("closing_boundary_ref_sha256") == bootstrap_head_sha
+        and date_root.get("opening_filtered_ref_sha256")
+        == date_root.get("closing_filtered_ref_sha256")
+    )
+    assert progress["closing_boundary_matches"] == closing_boundary_matches, (
+        "active date closing-boundary evidence mismatch"
+    )
+
+    date_refs = _evidence_references(
+        date_evidence.get("references"),
+        label="active date partition",
+    )
+    date_ref_set = set(date_refs)
+    date_sha = _reference_union_sha256(date_ref_set)
+    assert _sha256(
+        date_evidence.get("union_sha256"),
+        label="active date evidence union",
+    ) == date_sha, "active date evidence union hash mismatch"
+    date_pages = date_evidence.get("pages")
+    assert isinstance(date_pages, list), "active date page evidence is missing"
+    assert len(date_pages) == progress.get("accepted_pages_current_generation"), (
+        "active date accepted page/evidence mismatch"
+    )
+    date_page_records = 0
+    date_page_keys: set[tuple[str, int]] = set()
+    leaf_pages: dict[str, list[tuple[int, int, int, list[str]]]] = {}
+    flattened_leaf_refs: list[str] = []
+    date_page_evidence_valid = True
+    for page in date_pages:
+        assert isinstance(page, dict), "active date page evidence is invalid"
+        range_id = page.get("range_id")
+        assert isinstance(range_id, str) and range_id, (
+            "active date page range is invalid"
+        )
+        range_state = page.get("range_state")
+        assert range_state in allowed_range_states, "active date page range state is invalid"
+        assert range_id in range_by_id, "active date page range is absent from ledger"
+        assert range_by_id[range_id]["state"] == range_state, (
+            "active date page/range state mismatch"
+        )
+        page_number = page.get("page_number")
+        records = page.get("records")
+        total_count = page.get("total_count")
+        assert (
+            isinstance(page_number, int)
+            and not isinstance(page_number, bool)
+            and page_number >= 1
+        ), (
+            "active date page number is invalid"
+        )
+        assert isinstance(records, int) and not isinstance(records, bool) and records >= 0, (
+            "active date page records are invalid"
+        )
+        assert (
+            isinstance(total_count, int)
+            and not isinstance(total_count, bool)
+            and total_count >= 0
+        ), (
+            "active date page total is invalid"
+        )
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            page.get("raw_path"),
+            page.get("sha256"),
+            label=f"active date page {range_id}/{page_number}",
+        )
+        references = _evidence_references(
+            page.get("references"),
+            label=f"active date page {range_id}/{page_number}",
+        )
+        assert len(references) == records, (
+            "active date page reference/record mismatch"
+        )
+        assert len(references) == len(set(references)), (
+            "active date page contains duplicate references"
+        )
+        date_page_records += records
+        page_key = (range_id, page_number)
+        assert page_key not in date_page_keys, (
+            "active date page evidence contains a duplicate page"
+        )
+        date_page_keys.add(page_key)
+        if range_state == "leaf_exact":
+            leaf_pages.setdefault(range_id, []).append(
+                (page_number, records, total_count, references)
+            )
+            flattened_leaf_refs.extend(references)
+    assert date_page_records == progress.get("accepted_records_current_generation"), (
+        "active date accepted record/evidence mismatch"
+    )
+    for pages in leaf_pages.values():
+        totals = {total_count for _, _, total_count, _ in pages}
+        assert len(totals) == 1, "active date leaf total changed"
+        leaf_total = next(iter(totals))
+        expected_leaf_pages = max(
+            1,
+            (leaf_total + bootstrap["page_size"] - 1) // bootstrap["page_size"],
+        )
+        assert [page_number for page_number, _, _, _ in pages] == list(
+            range(1, expected_leaf_pages + 1)
+        ), "active date leaf page sequence is incomplete"
+        for page_number, records, _, _ in pages:
+            expected_records = min(
+                bootstrap["page_size"],
+                max(
+                    0,
+                    leaf_total - (page_number - 1) * bootstrap["page_size"],
+                ),
+            )
+            assert records == expected_records, (
+                "active date leaf page cardinality mismatch"
+            )
+    assert sorted(flattened_leaf_refs) == date_refs, (
+        "active date flattened leaf references mismatch"
+    )
+    date_duplicates = len(flattened_leaf_refs) - len(set(flattened_leaf_refs))
+    assert date_duplicates == progress.get("partition_duplicate_records"), (
+        "active date evidence duplicate arithmetic mismatch"
+    )
+
+    date_partition_authoritative = progress.get("date_partition_authoritative")
+    assert isinstance(date_partition_authoritative, bool), (
+        "active date partition authority flag is invalid"
+    )
+    expected_date_complete = bool(
+        root_domain_fixed
+        and progress.get("ranges_pending") == 0
+        and progress.get("ranges_blocked_single_day") == 0
+        and progress.get("partition_duplicate_records") == 0
+        and progress.get("leaf_integrity_error_count") == 0
+        and progress.get("range_geometry_error_count") == 0
+        and date_filtered_total is not None
+        and len(date_ref_set) == date_filtered_total
+        and date_page_evidence_valid
+    )
+    assert progress["date_partition_complete"] == expected_date_complete, (
+        "active date partition completion arithmetic mismatch"
+    )
+    expected_date_authority = bool(
+        expected_date_complete and closing_boundary_matches
+    )
+    assert date_partition_authoritative == expected_date_authority, (
+        "active date partition authority arithmetic mismatch"
+    )
+
+    residual = progress.get("residual")
+    residual_checks = evidence.get("residual_checks")
+    assert isinstance(residual, dict), "schema-3 residual status is missing"
+    assert isinstance(residual_checks, list), "schema-3 residual evidence is missing"
+    assert residual.get("derivation") == "bootstrap_minus_date_partition", (
+        "active residual derivation mismatch"
+    )
+    for key in (
+        "known_unique",
+        "verified_status4_unique",
+        "verified_nonactive_unique",
+        "pending_unique",
+        "unknown_unique",
+        "date_overlap_unique",
+        "date_outside_bootstrap_unique",
+    ):
+        assert _nonnegative_integer(residual.get(key)), (
+            f"active residual {key} is invalid"
+        )
+    assert residual.get("verification_generation") == generation, (
+        "active residual verification generation mismatch"
+    )
+    assert isinstance(residual.get("reconciliation_required"), bool), (
+        "active residual reconciliation flag is invalid"
+    )
+    check_refs: list[str] = []
+    verified_active_refs: set[str] = set()
+    verified_nonactive_refs: set[str] = set()
+    previous_residual_ref: str | None = None
+    for check_row in residual_checks:
+        assert isinstance(check_row, dict), "active residual evidence row is invalid"
+        ref = check_row.get("reference_number")
+        assert isinstance(ref, str) and ref, "active residual evidence reference is invalid"
+        assert previous_residual_ref is None or previous_residual_ref < ref, (
+            "active residual evidence is duplicate or unsorted"
+        )
+        previous_residual_ref = ref
+        check_refs.append(ref)
+        state = check_row.get("state")
+        assert state in {"verified_active", "verified_nonactive", "error"}, (
+            f"active residual evidence state is invalid: {ref}"
+        )
+        assert _nonnegative_integer(check_row.get("attempts")) and check_row[
+            "attempts"
+        ] >= 1, f"active residual attempts are invalid: {ref}"
+        assert isinstance(check_row.get("run_id"), str) and check_row["run_id"], (
+            f"active residual run_id is missing: {ref}"
+        )
+        assert isinstance(check_row.get("checked_at"), str) and check_row[
+            "checked_at"
+        ], f"active residual checked_at is missing: {ref}"
+        if state == "verified_active":
+            assert check_row.get("status_id") == 4, (
+                f"active residual status is not 4: {ref}"
+            )
+            assert check_row.get("error") in (None, ""), (
+                f"active residual verified row has an error: {ref}"
+            )
+            assert isinstance(check_row.get("raw_path"), str) and check_row["raw_path"], (
+                f"active residual raw evidence path is missing: {ref}"
+            )
+            _assert_raw_verification_pointer(
+                verification_by_path,
+                check_row.get("raw_path"),
+                check_row.get("sha256"),
+                label=f"active residual evidence {ref}",
+            )
+            verified_active_refs.add(ref)
+        elif state == "verified_nonactive":
+            status_id = check_row.get("status_id")
+            assert (
+                isinstance(status_id, int)
+                and not isinstance(status_id, bool)
+                and status_id != 4
+            ), (
+                f"nonactive residual status is missing, nonnumeric, or still 4: {ref}"
+            )
+            assert isinstance(check_row.get("raw_path"), str) and check_row[
+                "raw_path"
+            ], f"nonactive residual raw evidence path is missing: {ref}"
+            _assert_raw_verification_pointer(
+                verification_by_path,
+                check_row.get("raw_path"),
+                check_row.get("sha256"),
+                label=f"nonactive residual evidence {ref}",
+            )
+            verified_nonactive_refs.add(ref)
+        else:
+            assert isinstance(check_row.get("error"), str) and check_row["error"], (
+                f"active residual error detail is missing: {ref}"
+            )
+            assert check_row.get("status_id") is None, (
+                f"failed residual unexpectedly has a status: {ref}"
+            )
+    check_ref_set = set(check_refs)
+    derived_residual = bootstrap_ref_set - date_ref_set
+    date_outside_bootstrap = date_ref_set - bootstrap_ref_set
+    unexpected_checks = check_ref_set - derived_residual
+    pending_residual = (
+        derived_residual - verified_active_refs - verified_nonactive_refs
+    )
+    date_overlap = date_ref_set.intersection(verified_active_refs)
+    assert residual["known_unique"] == len(derived_residual), (
+        "active residual known/derived count mismatch"
+    )
+    assert residual["verified_status4_unique"] == len(
+        verified_active_refs & derived_residual
+    ), "active residual verified-status4 arithmetic mismatch"
+    assert residual["verified_nonactive_unique"] == len(
+        verified_nonactive_refs & derived_residual
+    ), "active residual verified-nonactive arithmetic mismatch"
+    assert residual["pending_unique"] == len(pending_residual), (
+        "active residual pending arithmetic mismatch"
+    )
+    assert residual["unknown_unique"] == len(unexpected_checks), (
+        "active residual unknown arithmetic mismatch"
+    )
+    residual_sha = _reference_union_sha256(derived_residual)
+    assert _sha256(
+        residual.get("set_sha256"),
+        label="active residual set",
+    ) == residual_sha, "active residual set hash mismatch"
+    assert residual["date_outside_bootstrap_unique"] == len(date_outside_bootstrap), (
+        "active residual date-outside-bootstrap arithmetic mismatch"
+    )
+    assert residual["date_overlap_unique"] == len(date_overlap), (
+        "active residual/date overlap arithmetic mismatch"
+    )
+    expected_reconciliation = bool(
+        date_outside_bootstrap
+        or unexpected_checks
+        or verified_nonactive_refs
+    )
+    assert residual["reconciliation_required"] == expected_reconciliation, (
+        "active residual reconciliation arithmetic mismatch"
+    )
+
+    union = progress.get("authoritative_union")
+    union_evidence = evidence.get("authoritative_union")
+    assert isinstance(union, dict), "schema-3 authoritative union status is missing"
+    assert isinstance(union_evidence, dict), (
+        "schema-3 authoritative union evidence is missing"
+    )
+    for key in ("unique_refs", "duplicate_records"):
+        assert _nonnegative_integer(union.get(key)), (
+            f"active authoritative union {key} is invalid"
+        )
+    assert union.get("unfiltered_boundary_total") is None or _nonnegative_integer(
+        union.get("unfiltered_boundary_total")
+    ), "active authoritative union boundary total is invalid"
+    union_refs = _evidence_references(
+        union_evidence.get("references"),
+        label="active authoritative union",
+    )
+    union_ref_set = set(union_refs)
+    assert len(union_refs) == len(union_ref_set), (
+        "active authoritative union evidence contains duplicate references"
+    )
+    expected_union = date_ref_set.union(verified_active_refs)
+    assert union_ref_set == expected_union, (
+        "active authoritative union evidence set mismatch"
+    )
+    assert union["unique_refs"] == len(union_ref_set), (
+        "active authoritative union count mismatch"
+    )
+    expected_union_duplicates = len(date_ref_set.intersection(verified_active_refs))
+    assert union["duplicate_records"] == expected_union_duplicates, (
+        "active authoritative union duplicate arithmetic mismatch"
+    )
+    union_sha = _reference_union_sha256(union_ref_set)
+    assert generation_scanned == len(union_ref_set), (
+        "active hybrid generation/evidence count mismatch"
+    )
+    assert _sha256(
+        progress.get("generation_union_sha256"),
+        label="active hybrid generation union",
+    ) == union_sha, "active hybrid generation union hash mismatch"
+    assert _sha256(
+        union_evidence.get("union_sha256"),
+        label="active authoritative evidence union",
+    ) == union_sha, "active authoritative evidence union hash mismatch"
+    assert _sha256(
+        union.get("union_sha256"),
+        label="active authoritative status union",
+    ) == union_sha, "active authoritative status union hash mismatch"
+    assert _sha256(
+        union.get("bootstrap_union_sha256"),
+        label="active authoritative bootstrap union",
+    ) == bootstrap_sha, "active authoritative bootstrap hash mismatch"
+    matches_bootstrap = bool(
+        bootstrap["complete"]
+        and not date_outside_bootstrap
+        and not unexpected_checks
+        and not pending_residual
+        and not verified_nonactive_refs
+        and not date_overlap
+        and union["duplicate_records"] == 0
+        and len(union_ref_set) == bootstrap["total_count"]
+        and union_sha == bootstrap_sha
+    )
+    assert union.get("matches_bootstrap") == matches_bootstrap, (
+        "active authoritative bootstrap match flag mismatch"
+    )
+    root_unfiltered_total = progress.get("root_unfiltered_boundary_total")
+    assert root_unfiltered_total == date_root.get("boundary_total_count"), (
+        "active date boundary total/status mismatch"
+    )
+    assert root_unfiltered_total == union["unfiltered_boundary_total"], (
+        "active authoritative boundary total differs from date progress"
+    )
+    boundary_matches = boundary_matches_bootstrap
+    assert union.get("boundary_matches") == boundary_matches, (
+        "active authoritative boundary match flag mismatch"
+    )
+    for key in ("matches_bootstrap", "boundary_matches", "matches_current", "authoritative"):
+        assert isinstance(union.get(key), bool), (
+            f"active authoritative union {key} flag is invalid"
+        )
+    convergence_passes = union.get("convergence_passes")
+    convergence_generation = union.get("convergence_last_generation")
+    assert (
+        isinstance(convergence_passes, int)
+        and not isinstance(convergence_passes, bool)
+        and convergence_passes >= 0
+    ), (
+        "active authoritative convergence pass count is invalid"
+    )
+    assert convergence_passes <= generation, (
+        "active authoritative convergence exceeds distinct generations"
+    )
+    assert convergence_generation is None or (
+        _nonnegative_integer(convergence_generation)
+        and 1 <= convergence_generation <= generation
+    ), "active authoritative convergence generation is invalid"
+    convergence_sha_value = union.get("convergence_union_sha256")
+    if convergence_passes:
+        convergence_sha = _sha256(
+            convergence_sha_value,
+            label="active authoritative convergence union",
+        )
+    else:
+        assert convergence_sha_value is None, (
+            "active authoritative convergence hash exists before a pass"
+        )
+        convergence_sha = None
+    assert union["matches_current"] == (
+        convergence_sha is not None and convergence_sha == union_sha
+    ), (
+        "active authoritative current-union match flag mismatch"
+    )
+    assert date_root.get("convergence_passes") == convergence_passes, (
+        "active generation convergence pass/root mismatch"
+    )
+    assert date_root.get("convergence_last_generation") == convergence_generation, (
+        "active generation convergence generation/root mismatch"
+    )
+    assert date_root.get("convergence_union_sha256") == convergence_sha_value, (
+        "active generation convergence hash/root mismatch"
+    )
+    assert progress.get("convergence_passes") == convergence_passes, (
+        "active generation convergence pass/status mismatch"
+    )
+    assert progress.get("convergence_last_generation") == convergence_generation, (
+        "active generation convergence generation/status mismatch"
+    )
+    assert progress.get("convergence_union_sha256") == convergence_sha_value, (
+        "active generation convergence hash/status mismatch"
+    )
+    assert progress.get("convergence_matches_current_union") == union[
+        "matches_current"
+    ], "active generation convergence-current flag mismatch"
+
+    proof_status = progress.get("generation_proofs")
+    proof_evidence = evidence.get("generation_proofs")
+    assert isinstance(proof_status, dict), (
+        "active generation proof status is missing"
+    )
+    assert isinstance(proof_evidence, list), (
+        "active generation proof evidence is missing"
+    )
+    assert proof_status.get("required") == 2, (
+        "active generation proof policy mismatch"
+    )
+    replayed_proofs = [
+        _assert_active_generation_proof(
+            proof,
+            bootstrap_refs=bootstrap_ref_set,
+            bootstrap_sha=bootstrap_sha,
+            bootstrap_head_sha=bootstrap_head_sha,
+            bootstrap_total=bootstrap["total_count"],
+            bootstrap_pass=bootstrap["pass_number"],
+            page_size=bootstrap["page_size"],
+            verification_by_path=verification_by_path,
+        )
+        for proof in proof_evidence
+    ]
+    referenced_raw_paths = {
+        str(page["raw_path"])
+        for page in [*bootstrap_pages, *date_pages]
+    }
+    referenced_raw_paths.update(
+        str(row["raw_path"])
+        for row in residual_checks
+        if isinstance(row, dict) and row.get("raw_path") not in (None, "")
+    )
+    for proof in proof_evidence:
+        assert isinstance(proof, dict)
+        referenced_raw_paths.update(
+            str(page["raw_path"])
+            for page in proof["page_evidence"]
+            if isinstance(page, dict)
+        )
+        referenced_raw_paths.update(
+            str(row["raw_path"])
+            for row in proof["residual_evidence"]
+            if isinstance(row, dict)
+        )
+        boundary = proof["boundary_evidence"]
+        referenced_raw_paths.update(
+            str(boundary[phase][lane]["raw_path"])
+            for phase in ("opening", "closing")
+            for lane in ("filtered", "unfiltered")
+        )
+    assert set(verification_by_path) == referenced_raw_paths, (
+        "active scan RAW verification has stale or missing pointers"
+    )
+    proof_generations_all = [item[0] for item in replayed_proofs]
+    assert len(proof_generations_all) == len(set(proof_generations_all)), (
+        "active generation proof ledger contains duplicate generations"
+    )
+    assert proof_generations_all == sorted(proof_generations_all), (
+        "active generation proof ledger is not ordered by generation"
+    )
+    assert all(proof_generation <= generation for proof_generation in proof_generations_all), (
+        "active generation proof is from a future generation"
+    )
+    proof_ordinals_all = [item[1] for item in replayed_proofs]
+    assert proof_ordinals_all == list(range(1, len(replayed_proofs) + 1)), (
+        "active generation proof ordinals are not distinct and contiguous"
+    )
+    current_generation_proofs = [
+        item for item in replayed_proofs if item[0] == generation
+    ]
+    assert len(current_generation_proofs) <= 1, (
+        "active generation proof current generation is duplicated"
+    )
+    if convergence_generation == generation:
+        assert current_generation_proofs, (
+            "active convergence has no proof for the current generation"
+        )
+        assert current_generation_proofs[0][1] == convergence_passes, (
+            "active current proof ordinal differs from convergence passes"
+        )
+    matching_proofs = [item for item in replayed_proofs if item[2] == union_sha]
+    matching_generations = sorted({item[0] for item in matching_proofs})
+    matching_ordinals = sorted({item[1] for item in matching_proofs})
+    assert proof_status.get("recorded_for_bootstrap_pass") == len(replayed_proofs), (
+        "active generation proof recorded count mismatch"
+    )
+    assert proof_status.get("matching_current_union") == len(matching_proofs), (
+        "active generation proof matching count mismatch"
+    )
+    assert proof_status.get("distinct_matching_generations") == len(
+        matching_generations
+    ), "active generation proof distinct-generation count mismatch"
+    assert proof_status.get("generations") == matching_generations, (
+        "active generation proof generation list mismatch"
+    )
+    assert proof_status.get("convergence_ordinals") == matching_ordinals, (
+        "active generation proof ordinal list mismatch"
+    )
+    proof_authoritative = bool(
+        len(matching_generations) >= 2
+        and generation in matching_generations
+        and max(matching_ordinals, default=0) >= 2
+    )
+    assert proof_status.get("authoritative") == proof_authoritative, (
+        "active generation proof authority arithmetic mismatch"
+    )
+    expected_ready_for_closing = bool(
+        expected_date_complete and boundary_matches and matches_bootstrap
+    )
+    assert progress.get("partition_ready_for_closing_boundary") == (
+        expected_ready_for_closing
+    ), "active hybrid closing-readiness arithmetic mismatch"
+    residual_clean = bool(
+        residual["verified_nonactive_unique"] == 0
+        and residual["pending_unique"] == 0
+        and residual["unknown_unique"] == 0
+        and residual["date_overlap_unique"] == 0
+        and residual["date_outside_bootstrap_unique"] == 0
+        and not residual["reconciliation_required"]
+    )
+    expected_union_authority = bool(
+        bootstrap["complete"]
+        and date_partition_authoritative
+        and residual_clean
+        and matches_bootstrap
+        and boundary_matches
+        and union["duplicate_records"] == 0
+        and convergence_passes >= 2
+        and convergence_generation == generation
+        and union["matches_current"]
+        and proof_authoritative
+    )
+    assert union["authoritative"] == expected_union_authority, (
+        "active hybrid union authority arithmetic mismatch"
+    )
+    assert progress.get("union_authoritative") == expected_union_authority, (
+        "active hybrid top-level union authority mismatch"
+    )
+    assert progress.get("partition_authoritative") == expected_union_authority, (
+        "active hybrid partition authority alias mismatch"
+    )
+
+    expected_completion = bool(expected_union_authority and resolved == target_count)
+    assert progress.get("completion_authoritative") == expected_completion, (
+        "active hybrid completion authority arithmetic mismatch"
+    )
+    expected_absence = bool(expected_union_authority and absent > 0)
+    assert progress.get("absence_authoritative") == expected_absence, (
+        "active hybrid absence authority arithmetic mismatch"
+    )
+
+
+def assert_active_date_scan_contract(
+    progress: object,
+    evidence: object = None,
+) -> None:
+    """Validate legacy date-only or schema-3 hybrid active-scan evidence."""
+
+    assert isinstance(progress, dict), "active date scan progress is invalid"
+    schema_version = progress.get("schema_version", 2)
+    assert schema_version in (2, 3), "active date scan schema version is unsupported"
+    if schema_version == 3:
+        assert_active_hybrid_scan_contract(progress, evidence)
+        return
+    _assert_legacy_active_date_scan_contract(progress)
+
+
+def _assert_legacy_active_date_scan_contract(progress: object) -> None:
+    """Validate the transitional schema-2 date-only partition contract."""
 
     assert isinstance(progress, dict), "active date scan progress is invalid"
     for key in (
@@ -666,6 +2279,9 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
     assert projection.get("lifecycle") == manifest.get("lifecycle"), (
         "fetch status lifecycle disagrees with manifest"
     )
+    assert fetch_status.get("still_missing") == manifest.get("still_missing"), (
+        "fetch status still_missing disagrees with manifest"
+    )
 
     assert not (data / "awarded.json").exists(), "legacy monolithic awarded.json must not exist"
     attributes = (root / ".gitattributes").read_text(encoding="utf-8") if (root / ".gitattributes").exists() else ""
@@ -780,7 +2396,28 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
         expected = f"{shard_for_ref(ref):02d}"
         assert row.get("_detailShard") == expected, f"index shard lookup mismatch: {ref}"
 
-    assert_active_scan_progress_contract(fetch_status.get("active_scan"))
+    active_scan = fetch_status.get("active_scan")
+    date_fallback = (
+        active_scan.get("date_fallback") if isinstance(active_scan, dict) else None
+    )
+    authority_evidence = parsed_assets.get("active_scan_authority.json")
+    if isinstance(date_fallback, dict) and date_fallback.get("schema_version") == 3:
+        authority_descriptor = assets.get("active_scan_authority.json") or {}
+        assert authority_descriptor.get("role") == "active_scan_authority_evidence", (
+            "active scan authority evidence role mismatch"
+        )
+        evidence_descriptor = date_fallback.get("evidence_asset") or {}
+        assert evidence_descriptor.get("bytes") == authority_descriptor.get("bytes"), (
+            "active scan authority evidence byte descriptor mismatch"
+        )
+        assert evidence_descriptor.get("sha256") == authority_descriptor.get("sha256"), (
+            "active scan authority evidence SHA descriptor mismatch"
+        )
+    else:
+        assert authority_evidence is None, (
+            "legacy active scan unexpectedly publishes schema-3 authority evidence"
+        )
+    assert_active_scan_progress_contract(active_scan, authority_evidence)
     assert_region_backfill_contract(
         fetch_status.get("region_backfill"),
         index_by_ref,
@@ -863,6 +2500,8 @@ def fetch_remote_asset(
                 raise AssertionError(f"remote awarded detail shard mismatch: {ref}")
             refs.add(ref)
         result["detail_refs"] = refs
+    elif name in {"fetch_status.json", "active_scan_authority.json"}:
+        result["payload"] = parsed
     return result
 
 
@@ -970,6 +2609,36 @@ def verify_remote_assets(
         detail_refs.update(results[name].get("detail_refs", set()))
     if set(index_refs) != detail_refs:
         raise AssertionError("remote awarded index/detail ref set mismatch")
+
+    fetch_status_result = results.get("fetch_status.json") or {}
+    fetch_status = fetch_status_result.get("payload")
+    assert isinstance(fetch_status, dict), "remote fetch status asset is missing"
+    assert fetch_status.get("still_missing") == manifest.get("still_missing"), (
+        "remote fetch status still_missing disagrees with manifest"
+    )
+    active_scan = fetch_status.get("active_scan")
+    date_fallback = (
+        active_scan.get("date_fallback") if isinstance(active_scan, dict) else None
+    )
+    authority_result = results.get("active_scan_authority.json") or {}
+    authority_evidence = authority_result.get("payload")
+    if isinstance(date_fallback, dict) and date_fallback.get("schema_version") == 3:
+        authority_descriptor = assets.get("active_scan_authority.json") or {}
+        assert authority_descriptor.get("role") == "active_scan_authority_evidence", (
+            "remote active scan authority evidence role mismatch"
+        )
+        evidence_descriptor = date_fallback.get("evidence_asset") or {}
+        assert evidence_descriptor.get("bytes") == authority_descriptor.get("bytes"), (
+            "remote active scan authority byte descriptor mismatch"
+        )
+        assert evidence_descriptor.get("sha256") == authority_descriptor.get("sha256"), (
+            "remote active scan authority SHA descriptor mismatch"
+        )
+    else:
+        assert authority_evidence is None, (
+            "remote legacy active scan unexpectedly publishes schema-3 evidence"
+        )
+    assert_active_scan_progress_contract(active_scan, authority_evidence)
     return results
 
 

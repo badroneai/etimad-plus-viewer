@@ -6,8 +6,10 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,7 @@ from export_warehouse import (  # noqa: E402
     official_overlay,
     official_projection_record,
     index_part_for_ref,
+    load_active_scan_authority,
     resolve_awarded_truth,
     searchable_award,
     seed_record,
@@ -72,6 +75,386 @@ def build_args(root: Path, database: Path, lock: Path, **overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def reference_sha(references: list[str]) -> str:
+    canonical = sorted(set(references))
+    payload = "\n".join(canonical) + ("\n" if canonical else "")
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def hybrid_active_fixture() -> tuple[dict, dict]:
+    bootstrap_refs = ["A", "B", "R"]
+    date_refs = ["A", "B"]
+    union_sha = reference_sha(bootstrap_refs)
+    date_sha = reference_sha(date_refs)
+    residual_sha = reference_sha(["R"])
+
+    def boundary_capture(
+        references: list[str],
+        *,
+        filtered: bool,
+        phase: str,
+        generation: int,
+    ) -> dict:
+        params = [
+            ("TenderCategory", "2"),
+            ("PublishDateId", "1"),
+            ("SortDirection", "DESC"),
+            ("Sort", "SubmitionDate"),
+            ("PageSize", "24"),
+            ("IsSearch", "true"),
+        ]
+        if filtered:
+            params.extend(
+                [
+                    ("FromLastOfferPresentationDateString", "01/01/1900"),
+                    ("ToLastOfferPresentationDateString", "31/12/2100"),
+                ]
+            )
+        params.append(("PageNumber", "1"))
+        raw_path = f"raw/{phase}-{'filtered' if filtered else 'all'}-{generation}.bin"
+        raw_bytes = json.dumps(
+            {
+                "data": [
+                    {"referenceNumber": reference} for reference in references
+                ],
+                "totalCount": len(references),
+                "pageSize": 24,
+                "currentPage": 1,
+            },
+            separators=(",", ":"),
+        ).encode()
+        return {
+            "raw_path": raw_path,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "status": 200,
+            "url": (
+                "https://tenders.etimad.sa/Tender/"
+                f"AllSupplierTendersForVisitorAsync?{urlencode(params)}"
+            ),
+            "content_type": "application/json",
+            "bytes": len(raw_bytes),
+            "total_count": len(references),
+            "records": len(references),
+            "references": references,
+            "reference_sha256": reference_sha(references),
+        }
+
+    date_root = {
+        "range_id": "range-1",
+        "from_day": "1900-01-01",
+        "to_day": "2100-12-31",
+        "parent_range_id": None,
+        "depth": 0,
+        "state": "leaf_exact",
+        "next_page": 1,
+        "total_count": 2,
+        "generation": 2,
+        "boundary_total_count": 3,
+        "boundary_ref_sha256": union_sha,
+        "domain_matches_boundary": False,
+        "closing_boundary_total_count": 3,
+        "closing_boundary_ref_sha256": union_sha,
+        "closing_boundary_generation": 2,
+        "closing_boundary_matches": True,
+        "scanned_high_watermark": 3,
+        "convergence_union_sha256": union_sha,
+        "convergence_passes": 2,
+        "convergence_last_generation": 2,
+        "bootstrap_pass_number": 1,
+        "opening_filtered_ref_sha256": date_sha,
+        "closing_filtered_ref_sha256": date_sha,
+    }
+
+    def generation_proof(generation: int, ordinal: int) -> dict:
+        date_raw_path = f"raw/date-{generation}.bin"
+        residual_raw_path = f"raw/residual-{generation}.bin"
+        return {
+            "bootstrap_pass_number": 1,
+            "generation": generation,
+            "convergence_ordinal": ordinal,
+            "date_unique": 2,
+            "date_union_sha256": date_sha,
+            "residual_unique": 1,
+            "residual_union_sha256": residual_sha,
+            "union_unique": 3,
+            "union_sha256": union_sha,
+            "bootstrap_union_sha256": union_sha,
+            "opening_filtered_total_count": 2,
+            "opening_filtered_ref_sha256": date_sha,
+            "closing_filtered_total_count": 2,
+            "closing_filtered_ref_sha256": date_sha,
+            "opening_boundary_total_count": 3,
+            "opening_boundary_ref_sha256": union_sha,
+            "closing_boundary_total_count": 3,
+            "closing_boundary_ref_sha256": union_sha,
+            "date_references": date_refs,
+            "residual_references": ["R"],
+            "union_references": bootstrap_refs,
+            "range_generations": [
+                {
+                    "range_id": "range-1",
+                    "from_day": "1900-01-01",
+                    "to_day": "2100-12-31",
+                    "generation": generation,
+                    "total_count": 2,
+                }
+            ],
+            "page_evidence": [
+                {
+                    "range_id": "range-1",
+                    "generation": generation,
+                    "page_number": 1,
+                    "total_count": 2,
+                    "records": 2,
+                    "raw_path": date_raw_path,
+                    "sha256": hashlib.sha256(date_raw_path.encode()).hexdigest(),
+                    "references": date_refs,
+                }
+            ],
+            "residual_evidence": [
+                {
+                    "reference_number": "R",
+                    "state": "verified_active",
+                    "status_id": 4,
+                    "raw_path": residual_raw_path,
+                    "sha256": hashlib.sha256(residual_raw_path.encode()).hexdigest(),
+                    "run_id": f"run-{generation}",
+                    "checked_at": f"2026-07-{17 + generation}T03:00:00+00:00",
+                }
+            ],
+            "boundary_evidence": {
+                "opening": {
+                    "filtered": boundary_capture(
+                        date_refs,
+                        filtered=True,
+                        phase="opening",
+                        generation=generation,
+                    ),
+                    "unfiltered": boundary_capture(
+                        bootstrap_refs,
+                        filtered=False,
+                        phase="opening",
+                        generation=generation,
+                    ),
+                },
+                "closing": {
+                    "filtered": boundary_capture(
+                        date_refs,
+                        filtered=True,
+                        phase="closing",
+                        generation=generation,
+                    ),
+                    "unfiltered": boundary_capture(
+                        bootstrap_refs,
+                        filtered=False,
+                        phase="closing",
+                        generation=generation,
+                    ),
+                },
+            },
+            "run_id": f"run-{generation}",
+            "closed_at": f"2026-07-{17 + generation}T04:00:00+00:00",
+        }
+
+    proofs = [generation_proof(1, 1), generation_proof(2, 2)]
+    progress = {
+        "schema_version": 3,
+        "mode": "official_active_hybrid_union",
+        "cycle_id": "cycle-hybrid",
+        "generation": 2,
+        "target_count": 2,
+        "targets_observed_unique": 2,
+        "targets_resolved_unique": 2,
+        "targets_absent_after_full_partitions": 0,
+        "targets_observed_percent": 100.0,
+        "ranges_total": 1,
+        "ranges_pending": 0,
+        "ranges_split": 0,
+        "ranges_exact": 1,
+        "ranges_blocked_single_day": 0,
+        "root_from_day": "1900-01-01",
+        "root_to_day": "2100-12-31",
+        "root_domain_fixed": True,
+        "root_filtered_total": 2,
+        "root_unfiltered_boundary_total": 3,
+        "domain_matches_unfiltered_boundary": False,
+        "unfiltered_boundary_matches_bootstrap": True,
+        "closing_boundary_matches": True,
+        "official_active_scanned_unique": 3,
+        "official_active_scanned_lifetime_high_watermark": 3,
+        "official_active_scanned_percent": 100.0,
+        "official_active_generation_scanned_unique": 3,
+        "official_active_generation_scanned_percent": 100.0,
+        "accepted_pages_current_generation": 1,
+        "accepted_records_current_generation": 2,
+        "partition_duplicate_records": 0,
+        "leaf_integrity_error_count": 0,
+        "range_geometry_error_count": 0,
+        "generation_union_sha256": union_sha,
+        "convergence_union_sha256": union_sha,
+        "convergence_passes": 2,
+        "convergence_last_generation": 2,
+        "convergence_matches_current_union": True,
+        "partition_ready_for_closing_boundary": True,
+        "date_partition_complete": True,
+        "date_partition_authoritative": True,
+        "union_authoritative": True,
+        "absence_authoritative": False,
+        "completion_authoritative": True,
+        "bootstrap": {
+            "state": "complete",
+            "pass_number": 1,
+            "total_count": 3,
+            "page_size": 24,
+            "expected_pages": 1,
+            "pages_committed": 1,
+            "page_holes": [],
+            "page_hole_count": 0,
+            "records": 3,
+            "unique_refs": 3,
+            "duplicate_records": 0,
+            "integrity_error_count": 0,
+            "head_ref_sha256": union_sha,
+            "union_sha256": union_sha,
+            "complete": True,
+        },
+        "residual": {
+            "derivation": "bootstrap_minus_date_partition",
+            "known_unique": 1,
+            "verified_status4_unique": 1,
+            "verified_nonactive_unique": 0,
+            "pending_unique": 0,
+            "unknown_unique": 0,
+            "date_overlap_unique": 0,
+            "date_outside_bootstrap_unique": 0,
+            "set_sha256": residual_sha,
+            "verification_generation": 2,
+            "reconciliation_required": False,
+        },
+        "authoritative_union": {
+            "unique_refs": 3,
+            "duplicate_records": 0,
+            "union_sha256": union_sha,
+            "bootstrap_union_sha256": union_sha,
+            "matches_bootstrap": True,
+            "unfiltered_boundary_total": 3,
+            "boundary_matches": True,
+            "convergence_passes": 2,
+            "convergence_last_generation": 2,
+            "convergence_union_sha256": union_sha,
+            "matches_current": True,
+            "authoritative": True,
+        },
+        "generation_proofs": {
+            "required": 2,
+            "recorded_for_bootstrap_pass": 2,
+            "matching_current_union": 2,
+            "distinct_matching_generations": 2,
+            "generations": [1, 2],
+            "convergence_ordinals": [1, 2],
+            "authoritative": True,
+        },
+        "partition_authoritative": True,
+        "evidence_asset": {
+            "schema_version": 1,
+            "file": "active_scan_authority.json",
+            "bytes": 1,
+            "sha256": "e" * 64,
+        },
+    }
+    evidence = {
+        "schema_version": 1,
+        "cycle_id": "cycle-hybrid",
+        "generation": 2,
+        "bootstrap": {
+            "pass_number": 1,
+            "pages": [
+                {
+                    "page_number": 1,
+                    "records": 3,
+                    "total_count": 3,
+                    "raw_path": "raw/bootstrap.bin",
+                    "sha256": hashlib.sha256(b"raw/bootstrap.bin").hexdigest(),
+                    "references": ["R", "A", "B"],
+                }
+            ],
+            "references": bootstrap_refs,
+            "head_ref_sha256": union_sha,
+            "union_sha256": union_sha,
+        },
+        "date_partition": {
+            "generation": 2,
+            "root": date_root,
+            "ranges": [date_root],
+            "pages": [
+                {
+                    "range_id": "range-1",
+                    "range_state": "leaf_exact",
+                    "page_number": 1,
+                    "records": 2,
+                    "total_count": 2,
+                    "raw_path": "raw/date-current.bin",
+                    "sha256": hashlib.sha256(b"raw/date-current.bin").hexdigest(),
+                    "references": date_refs,
+                }
+            ],
+            "references": date_refs,
+            "union_sha256": date_sha,
+        },
+        "residual_checks": [
+            {
+                "reference_number": "R",
+                "state": "verified_active",
+                "status_id": 4,
+                "raw_path": "raw/residual-R.bin",
+                "sha256": hashlib.sha256(b"raw/residual-R.bin").hexdigest(),
+                "run_id": "run-2",
+                "checked_at": "2026-07-19T03:00:00+00:00",
+                "attempts": 1,
+                "error": None,
+            }
+        ],
+        "generation_proofs": proofs,
+        "authoritative_union": {
+            "references": bootstrap_refs,
+            "union_sha256": union_sha,
+        },
+    }
+    raw_files: dict[str, dict] = {}
+
+    def declare_raw(raw_path: str, sha256: str, byte_count: int = 1) -> None:
+        raw_files[raw_path] = {
+            "raw_path": raw_path,
+            "sha256": sha256,
+            "bytes": byte_count,
+        }
+
+    for page in [
+        *evidence["bootstrap"]["pages"],
+        *evidence["date_partition"]["pages"],
+    ]:
+        declare_raw(page["raw_path"], page["sha256"])
+    for row in evidence["residual_checks"]:
+        declare_raw(row["raw_path"], row["sha256"])
+    for proof in proofs:
+        for page in proof["page_evidence"]:
+            declare_raw(page["raw_path"], page["sha256"])
+        for row in proof["residual_evidence"]:
+            declare_raw(row["raw_path"], row["sha256"])
+        for phase in ("opening", "closing"):
+            for lane in ("filtered", "unfiltered"):
+                capture = proof["boundary_evidence"][phase][lane]
+                declare_raw(capture["raw_path"], capture["sha256"], capture["bytes"])
+    verification_files = [raw_files[path] for path in sorted(raw_files)]
+    evidence["raw_verification"] = {
+        "mode": "export_time_official_warehouse_bytes",
+        "verified_files": len(verification_files),
+        "verified_bytes": sum(item["bytes"] for item in verification_files),
+        "files": verification_files,
+    }
+    return progress, evidence
 
 
 class ExportContractTests(unittest.TestCase):
@@ -569,8 +952,11 @@ class ExportContractTests(unittest.TestCase):
             connection.close()
 
             lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json")
+            (root / "data").mkdir()
+            (root / "data/active_scan_authority.json").write_text("{}")
             manifest = build(build_args(root, database, lock))
             status = json.loads((root / "data/fetch_status.json").read_text())
+            self.assertFalse((root / "data/active_scan_authority.json").exists())
             self.assertEqual(status["active_scan"], active_scan)
             self.assertEqual(status["region_backfill"], region_backfill)
             self.assertFalse(status["still_missing"]["active_refresh_sweep"]["complete"])
@@ -838,6 +1224,558 @@ class ExportContractTests(unittest.TestCase):
         incomplete_authority = {**progress, "completion_authoritative": False}
         with self.assertRaisesRegex(AssertionError, "completion authority arithmetic"):
             assert_active_date_scan_contract(incomplete_authority)
+
+    def test_active_hybrid_contract_proves_bootstrap_date_and_residual_union(self):
+        progress, evidence = hybrid_active_fixture()
+        assert_active_date_scan_contract(progress, evidence)
+        assert_active_scan_progress_contract(
+            {
+                "cycle_id": "cycle-hybrid",
+                "denominator": 2,
+                "targets_scanned_unique": 2,
+                "targets_resolved_unique": 2,
+                "targets_absent_after_full_pass": 0,
+                "targets_remaining": 0,
+                "scanned_percent": 100.0,
+                "coverage_percent": 100.0,
+                "absence_confirmation_passes": 2,
+                "bootstrap": progress["bootstrap"],
+                "bootstrap_complete": True,
+                "complete": True,
+                "date_fallback": progress,
+            },
+            evidence,
+        )
+
+    def test_active_hybrid_contract_accepts_unchecked_and_error_residual_progress(self):
+        progress, evidence = hybrid_active_fixture()
+        date_sha = reference_sha(["A", "B"])
+        partial = deepcopy(progress)
+        partial.update(
+            {
+                "closing_boundary_matches": False,
+                "official_active_scanned_unique": 2,
+                "official_active_scanned_lifetime_high_watermark": 2,
+                "official_active_scanned_percent": 66.666667,
+                "official_active_generation_scanned_unique": 2,
+                "official_active_generation_scanned_percent": 66.666667,
+                "generation_union_sha256": date_sha,
+                "convergence_union_sha256": None,
+                "convergence_passes": 0,
+                "convergence_last_generation": None,
+                "convergence_matches_current_union": False,
+                "partition_ready_for_closing_boundary": False,
+                "date_partition_authoritative": False,
+                "union_authoritative": False,
+                "partition_authoritative": False,
+                "completion_authoritative": False,
+            }
+        )
+        partial["residual"].update(
+            {
+                "verified_status4_unique": 0,
+                "pending_unique": 1,
+            }
+        )
+        partial["authoritative_union"].update(
+            {
+                "unique_refs": 2,
+                "union_sha256": date_sha,
+                "matches_bootstrap": False,
+                "convergence_passes": 0,
+                "convergence_last_generation": None,
+                "convergence_union_sha256": None,
+                "matches_current": False,
+                "authoritative": False,
+            }
+        )
+        partial["generation_proofs"].update(
+            {
+                "recorded_for_bootstrap_pass": 0,
+                "matching_current_union": 0,
+                "distinct_matching_generations": 0,
+                "generations": [],
+                "convergence_ordinals": [],
+                "authoritative": False,
+            }
+        )
+        partial_evidence = deepcopy(evidence)
+        partial_evidence["authoritative_union"] = {
+            "references": ["A", "B"],
+            "union_sha256": date_sha,
+        }
+        partial_evidence["generation_proofs"] = []
+        partial_raw_paths = {"raw/bootstrap.bin", "raw/date-current.bin"}
+        partial_raw_files = [
+            item
+            for item in partial_evidence["raw_verification"]["files"]
+            if item["raw_path"] in partial_raw_paths
+        ]
+        partial_evidence["raw_verification"].update(
+            {
+                "verified_files": len(partial_raw_files),
+                "verified_bytes": sum(item["bytes"] for item in partial_raw_files),
+                "files": partial_raw_files,
+            }
+        )
+        root = partial_evidence["date_partition"]["root"]
+        root.update(
+            {
+                "closing_boundary_total_count": None,
+                "closing_boundary_ref_sha256": None,
+                "closing_boundary_generation": None,
+                "closing_boundary_matches": False,
+                "scanned_high_watermark": 2,
+                "convergence_union_sha256": None,
+                "convergence_passes": 0,
+                "convergence_last_generation": None,
+                "closing_filtered_ref_sha256": None,
+            }
+        )
+
+        partial_evidence["residual_checks"] = []
+        assert_active_date_scan_contract(partial, partial_evidence)
+
+        partial_evidence["residual_checks"] = [
+            {
+                "reference_number": "R",
+                "state": "error",
+                "status_id": None,
+                "raw_path": None,
+                "sha256": None,
+                "run_id": "run-error",
+                "checked_at": "2026-07-19T03:00:00+00:00",
+                "attempts": 1,
+                "error": "transient timeout",
+            }
+        ]
+        assert_active_date_scan_contract(partial, partial_evidence)
+
+    def test_active_hybrid_contract_rejects_malicious_authority_evidence(self):
+        progress, evidence = hybrid_active_fixture()
+
+        bad_hole = deepcopy(progress)
+        bad_hole["bootstrap"]["pages_committed"] = 0
+        with self.assertRaisesRegex(AssertionError, "committed page/evidence"):
+            assert_active_date_scan_contract(bad_hole, evidence)
+
+        bad_status = deepcopy(evidence)
+        bad_status["residual_checks"][0]["status_id"] = 3
+        with self.assertRaisesRegex(AssertionError, "status is not 4"):
+            assert_active_date_scan_contract(progress, bad_status)
+
+        bad_residual = deepcopy(evidence)
+        bad_residual["residual_checks"][0]["reference_number"] = "A"
+        bad_residual_progress = deepcopy(progress)
+        bad_residual_progress["residual"]["set_sha256"] = reference_sha(["A"])
+        bad_residual_progress["residual"]["date_overlap_unique"] = 1
+        with self.assertRaisesRegex(AssertionError, "verified-status4 arithmetic"):
+            assert_active_date_scan_contract(bad_residual_progress, bad_residual)
+
+        bad_hash = deepcopy(progress)
+        bad_hash["authoritative_union"]["union_sha256"] = "f" * 64
+        with self.assertRaisesRegex(AssertionError, "status union hash mismatch"):
+            assert_active_date_scan_contract(bad_hash, evidence)
+
+        bad_proof_page = deepcopy(evidence)
+        bad_proof_page["generation_proofs"][0]["page_evidence"][0][
+            "references"
+        ] = ["A", "X"]
+        with self.assertRaisesRegex(AssertionError, "pages do not replay to D"):
+            assert_active_date_scan_contract(progress, bad_proof_page)
+
+        bad_proof_boundary = deepcopy(evidence)
+        bad_proof_boundary["generation_proofs"][0][
+            "closing_filtered_total_count"
+        ] = 99
+        with self.assertRaisesRegex(AssertionError, "filtered total changed"):
+            assert_active_date_scan_contract(progress, bad_proof_boundary)
+
+        forged_totals = deepcopy(evidence)
+        forged_totals["generation_proofs"][0]["opening_filtered_total_count"] = 99
+        forged_totals["generation_proofs"][0]["closing_filtered_total_count"] = 99
+        with self.assertRaisesRegex(AssertionError, "filtered total differs"):
+            assert_active_date_scan_contract(progress, forged_totals)
+
+        forged_heads = deepcopy(evidence)
+        forged_heads["generation_proofs"][0]["opening_filtered_ref_sha256"] = "f" * 64
+        forged_heads["generation_proofs"][0]["closing_filtered_ref_sha256"] = "f" * 64
+        with self.assertRaisesRegex(AssertionError, "boundary head"):
+            assert_active_date_scan_contract(progress, forged_heads)
+
+        outside_date_boundary = deepcopy(evidence)
+        outside_proof = outside_date_boundary["generation_proofs"][0]
+        outside_sha = reference_sha(["X", "Y"])
+        outside_proof["opening_filtered_ref_sha256"] = outside_sha
+        outside_proof["closing_filtered_ref_sha256"] = outside_sha
+        for phase in ("opening", "closing"):
+            capture = outside_proof["boundary_evidence"][phase]["filtered"]
+            capture["references"] = ["X", "Y"]
+            capture["reference_sha256"] = outside_sha
+        with self.assertRaisesRegex(AssertionError, "references are outside D"):
+            assert_active_date_scan_contract(progress, outside_date_boundary)
+
+        future_generation = deepcopy(evidence)
+        future_proof = future_generation["generation_proofs"][1]
+        future_proof["generation"] = 999
+        future_proof["range_generations"][0]["generation"] = 999
+        future_proof["page_evidence"][0]["generation"] = 999
+        with self.assertRaisesRegex(AssertionError, "future generation"):
+            assert_active_date_scan_contract(progress, future_generation)
+
+        duplicate_ordinal = deepcopy(evidence)
+        duplicate_ordinal["generation_proofs"][0]["convergence_ordinal"] = 2
+        with self.assertRaisesRegex(AssertionError, "ordinals are not distinct"):
+            assert_active_date_scan_contract(progress, duplicate_ordinal)
+
+        replayed_generation = deepcopy(progress)
+        one_proof = deepcopy(evidence)
+        one_proof["generation_proofs"] = [one_proof["generation_proofs"][1]]
+        one_proof_raw_files = [
+            item
+            for item in one_proof["raw_verification"]["files"]
+            if not item["raw_path"].endswith("-1.bin")
+        ]
+        one_proof["raw_verification"].update(
+            {
+                "verified_files": len(one_proof_raw_files),
+                "verified_bytes": sum(item["bytes"] for item in one_proof_raw_files),
+                "files": one_proof_raw_files,
+            }
+        )
+        replayed_generation["generation_proofs"].update(
+            {
+                "recorded_for_bootstrap_pass": 1,
+                "matching_current_union": 1,
+                "distinct_matching_generations": 1,
+                "generations": [2],
+                "convergence_ordinals": [2],
+                "authoritative": False,
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, "ordinals are not distinct"):
+            assert_active_date_scan_contract(replayed_generation, one_proof)
+
+    def test_export_builds_manifest_addressed_hybrid_authority_from_sqlite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database = root / "official.sqlite3"
+            progress, expected_evidence = hybrid_active_fixture()
+            active_scan = {
+                "cycle_id": "cycle-hybrid",
+                "denominator": 2,
+                "targets_scanned_unique": 2,
+                "targets_resolved_unique": 2,
+                "targets_absent_after_full_pass": 0,
+                "targets_remaining": 0,
+                "scanned_percent": 100.0,
+                "coverage_percent": 100.0,
+                "absence_confirmation_passes": 2,
+                "bootstrap": progress["bootstrap"],
+                "bootstrap_complete": True,
+                "complete": True,
+                "date_fallback": progress,
+            }
+            region_backfill = {
+                "awarded_total": 1,
+                "initial_filled": 0,
+                "initial_missing": 1,
+                "backfilled_unique": 0,
+                "current_filled": 0,
+                "remaining": 1,
+                "backfill_percent": 0.0,
+                "overall_fill_percent": 0.0,
+            }
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE baseline_tenders (
+                  reference_number TEXT PRIMARY KEY,seed_state TEXT,source_layer TEXT,
+                  imported_at TEXT,record_json TEXT,source_fetched_at TEXT
+                );
+                INSERT INTO baseline_tenders VALUES
+                  ('AWARD','awarded','phase0/awarded','2026-07-18T11:00:00+00:00',
+                   '{"ref":"AWARD","winAmount":1}',
+                   '2026-07-18T10:00:00+00:00');
+                CREATE TABLE meta (key TEXT PRIMARY KEY,value TEXT);
+                CREATE TABLE active_scan_pages (
+                  cycle_id TEXT,pass_number INTEGER,page_number INTEGER,sha256 TEXT,
+                  raw_path TEXT,records INTEGER,total_count INTEGER,references_json TEXT
+                );
+                CREATE TABLE active_scan_date_ranges (
+                  cycle_id TEXT,range_id TEXT,from_day TEXT,to_day TEXT,
+                  parent_range_id TEXT,depth INTEGER,state TEXT,next_page INTEGER,
+                  total_count INTEGER,generation INTEGER,boundary_total_count INTEGER,
+                  boundary_ref_sha256 TEXT,domain_matches_boundary INTEGER,
+                  closing_boundary_total_count INTEGER,closing_boundary_ref_sha256 TEXT,
+                  closing_boundary_generation INTEGER,closing_boundary_matches INTEGER,
+                  scanned_high_watermark INTEGER,convergence_union_sha256 TEXT,
+                  convergence_passes INTEGER,convergence_last_generation INTEGER,
+                  bootstrap_pass_number INTEGER,opening_filtered_ref_sha256 TEXT,
+                  closing_filtered_ref_sha256 TEXT
+                );
+                CREATE TABLE active_scan_date_pages (
+                  cycle_id TEXT,range_id TEXT,generation INTEGER,page_number INTEGER,
+                  total_count INTEGER,records INTEGER,raw_path TEXT,sha256 TEXT,
+                  references_json TEXT
+                );
+                CREATE TABLE active_scan_residual_checks (
+                  cycle_id TEXT,generation INTEGER,reference_number TEXT,state TEXT,
+                  status_id INTEGER,raw_path TEXT,sha256 TEXT,run_id TEXT,
+                  checked_at TEXT,attempts INTEGER,error TEXT
+                );
+                CREATE TABLE active_scan_date_generation_proofs (
+                  cycle_id TEXT,bootstrap_pass_number INTEGER,generation INTEGER,
+                  convergence_ordinal INTEGER,date_unique INTEGER,date_union_sha256 TEXT,
+                  residual_unique INTEGER,residual_union_sha256 TEXT,union_unique INTEGER,
+                  union_sha256 TEXT,bootstrap_union_sha256 TEXT,
+                  opening_filtered_total_count INTEGER,
+                  opening_filtered_ref_sha256 TEXT,
+                  closing_filtered_total_count INTEGER,
+                  closing_filtered_ref_sha256 TEXT,
+                  opening_boundary_total_count INTEGER,
+                  opening_boundary_ref_sha256 TEXT,
+                  closing_boundary_total_count INTEGER,
+                  closing_boundary_ref_sha256 TEXT,date_references_json TEXT,
+                  residual_references_json TEXT,union_references_json TEXT,
+                  range_generations_json TEXT,page_evidence_json TEXT,
+                  residual_evidence_json TEXT,boundary_evidence_json TEXT,
+                  run_id TEXT,closed_at TEXT
+                );
+                """
+            )
+            boundary_by_path = {
+                capture["raw_path"]: capture
+                for proof in expected_evidence["generation_proofs"]
+                for phase in ("opening", "closing")
+                for capture in proof["boundary_evidence"][phase].values()
+            }
+            for raw_descriptor in expected_evidence["raw_verification"]["files"]:
+                raw_target = database.parent / raw_descriptor["raw_path"]
+                raw_target.parent.mkdir(parents=True, exist_ok=True)
+                capture = boundary_by_path.get(raw_descriptor["raw_path"])
+                raw_bytes = (
+                    json.dumps(
+                        {
+                            "data": [
+                                {"referenceNumber": reference}
+                                for reference in capture["references"]
+                            ],
+                            "totalCount": capture["total_count"],
+                            "pageSize": 24,
+                            "currentPage": 1,
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                    if capture is not None
+                    else raw_descriptor["raw_path"].encode()
+                )
+                raw_target.write_bytes(raw_bytes)
+            bootstrap_page = expected_evidence["bootstrap"]["pages"][0]
+            connection.execute(
+                "INSERT INTO active_scan_pages VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "cycle-hybrid",
+                    1,
+                    bootstrap_page["page_number"],
+                    bootstrap_page["sha256"],
+                    bootstrap_page["raw_path"],
+                    bootstrap_page["records"],
+                    bootstrap_page["total_count"],
+                    json.dumps(bootstrap_page["references"]),
+                ),
+            )
+            date_page = expected_evidence["date_partition"]["pages"][0]
+            connection.execute(
+                "INSERT INTO active_scan_date_pages VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    "cycle-hybrid",
+                    date_page["range_id"],
+                    2,
+                    date_page["page_number"],
+                    date_page["total_count"],
+                    date_page["records"],
+                    date_page["raw_path"],
+                    date_page["sha256"],
+                    json.dumps(date_page["references"]),
+                ),
+            )
+            residual_row = expected_evidence["residual_checks"][0]
+            connection.execute(
+                "INSERT INTO active_scan_residual_checks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "cycle-hybrid",
+                    2,
+                    residual_row["reference_number"],
+                    residual_row["state"],
+                    residual_row["status_id"],
+                    residual_row["raw_path"],
+                    residual_row["sha256"],
+                    residual_row["run_id"],
+                    residual_row["checked_at"],
+                    residual_row["attempts"],
+                    residual_row["error"],
+                ),
+            )
+            root_ledger = expected_evidence["date_partition"]["root"]
+            connection.execute(
+                "INSERT INTO active_scan_date_ranges VALUES ("
+                + ",".join("?" for _ in range(24))
+                + ")",
+                (
+                    "cycle-hybrid",
+                    root_ledger["range_id"],
+                    root_ledger["from_day"],
+                    root_ledger["to_day"],
+                    root_ledger["parent_range_id"],
+                    root_ledger["depth"],
+                    root_ledger["state"],
+                    root_ledger["next_page"],
+                    root_ledger["total_count"],
+                    root_ledger["generation"],
+                    root_ledger["boundary_total_count"],
+                    root_ledger["boundary_ref_sha256"],
+                    int(root_ledger["domain_matches_boundary"]),
+                    root_ledger["closing_boundary_total_count"],
+                    root_ledger["closing_boundary_ref_sha256"],
+                    root_ledger["closing_boundary_generation"],
+                    int(root_ledger["closing_boundary_matches"]),
+                    root_ledger["scanned_high_watermark"],
+                    root_ledger["convergence_union_sha256"],
+                    root_ledger["convergence_passes"],
+                    root_ledger["convergence_last_generation"],
+                    root_ledger["bootstrap_pass_number"],
+                    root_ledger["opening_filtered_ref_sha256"],
+                    root_ledger["closing_filtered_ref_sha256"],
+                ),
+            )
+            for proof in expected_evidence["generation_proofs"]:
+                connection.execute(
+                    "INSERT INTO active_scan_date_generation_proofs VALUES ("
+                    + ",".join("?" for _ in range(28))
+                    + ")",
+                    (
+                        "cycle-hybrid",
+                        proof["bootstrap_pass_number"],
+                        proof["generation"],
+                        proof["convergence_ordinal"],
+                        proof["date_unique"],
+                        proof["date_union_sha256"],
+                        proof["residual_unique"],
+                        proof["residual_union_sha256"],
+                        proof["union_unique"],
+                        proof["union_sha256"],
+                        proof["bootstrap_union_sha256"],
+                        proof["opening_filtered_total_count"],
+                        proof["opening_filtered_ref_sha256"],
+                        proof["closing_filtered_total_count"],
+                        proof["closing_filtered_ref_sha256"],
+                        proof["opening_boundary_total_count"],
+                        proof["opening_boundary_ref_sha256"],
+                        proof["closing_boundary_total_count"],
+                        proof["closing_boundary_ref_sha256"],
+                        json.dumps(proof["date_references"]),
+                        json.dumps(proof["residual_references"]),
+                        json.dumps(proof["union_references"]),
+                        json.dumps(proof["range_generations"]),
+                        json.dumps(proof["page_evidence"]),
+                        json.dumps(proof["residual_evidence"]),
+                        json.dumps(proof["boundary_evidence"]),
+                        proof["run_id"],
+                        proof["closed_at"],
+                    ),
+                )
+            connection.executemany(
+                "INSERT INTO meta VALUES (?,?)",
+                (
+                    (
+                        "baseline_awarded",
+                        json.dumps(
+                            {
+                                "source_has_more": True,
+                                "source_partial": True,
+                                "source_complete": False,
+                                "source_fetched_at": "2026-07-18T10:00:00+00:00",
+                            }
+                        ),
+                    ),
+                    ("active_scan", json.dumps(active_scan)),
+                    ("region_backfill", json.dumps(region_backfill)),
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json")
+            manifest = build(build_args(root, database, lock))
+            authority = json.loads(
+                (root / "data/active_scan_authority.json").read_text()
+            )
+            status = json.loads((root / "data/fetch_status.json").read_text())
+            descriptor = manifest["assets"]["active_scan_authority.json"]
+            self.assertEqual(descriptor["role"], "active_scan_authority_evidence")
+            self.assertEqual(authority["bootstrap"]["references"], ["A", "B", "R"])
+            self.assertEqual(authority["date_partition"]["references"], ["A", "B"])
+            self.assertEqual(
+                [proof["generation"] for proof in authority["generation_proofs"]],
+                [1, 2],
+            )
+            self.assertEqual(
+                authority["generation_proofs"][1]["union_references"],
+                ["A", "B", "R"],
+            )
+            self.assertEqual(
+                status["active_scan"]["date_fallback"]["evidence_asset"]["sha256"],
+                descriptor["sha256"],
+            )
+            self.assertNotIn("active_refresh_sweep", status["still_missing"])
+            self.assertNotIn("active_refresh_sweep", manifest["still_missing"])
+            self.assertEqual(check(root)["awarded"], 1)
+            manifest_path = root / "data/manifest.json"
+            malicious_manifest = json.loads(manifest_path.read_text())
+            malicious_manifest["still_missing"]["active_refresh_sweep"] = {
+                "complete": False
+            }
+            manifest_path.write_text(json.dumps(malicious_manifest))
+            with self.assertRaisesRegex(AssertionError, "still_missing disagrees"):
+                check(root)
+            proof_one = expected_evidence["generation_proofs"][0]
+            forged_boundary = deepcopy(proof_one["boundary_evidence"])
+            forged_head = reference_sha(["X", "Y"])
+            for phase in ("opening", "closing"):
+                forged_boundary[phase]["filtered"]["references"] = ["X", "Y"]
+                forged_boundary[phase]["filtered"]["reference_sha256"] = forged_head
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "UPDATE active_scan_date_generation_proofs SET "
+                "opening_filtered_ref_sha256=?,closing_filtered_ref_sha256=?,"
+                "boundary_evidence_json=? WHERE generation=1",
+                (
+                    forged_head,
+                    forged_head,
+                    json.dumps(forged_boundary),
+                ),
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(RuntimeError, "RAW body differs"):
+                load_active_scan_authority(database, active_scan)
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "UPDATE active_scan_date_generation_proofs SET "
+                "opening_filtered_ref_sha256=?,closing_filtered_ref_sha256=?,"
+                "boundary_evidence_json=? WHERE generation=1",
+                (
+                    proof_one["opening_filtered_ref_sha256"],
+                    proof_one["closing_filtered_ref_sha256"],
+                    json.dumps(proof_one["boundary_evidence"]),
+                ),
+            )
+            connection.commit()
+            connection.close()
+            (database.parent / "raw/bootstrap.bin").write_bytes(b"tampered")
+            with self.assertRaisesRegex(RuntimeError, "RAW SHA-256 mismatch"):
+                load_active_scan_authority(database, active_scan)
 
     def test_lifecycle_and_deadline_windows_are_recomputed_from_snapshot_time(self):
         with tempfile.TemporaryDirectory() as temp:

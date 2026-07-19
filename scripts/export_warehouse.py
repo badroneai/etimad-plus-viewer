@@ -26,6 +26,8 @@ SHARD_COUNT = 64
 AWARDED_INDEX_PART_COUNT = 16
 AWARDED_INDEX_PART_FORMAT_VERSION = 1
 AWARDED_INDEX_PART_ALGORITHM = "sha256_first_byte_mod_16"
+ACTIVE_SCAN_AUTHORITY_FILE = "active_scan_authority.json"
+ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION = 1
 SAUDI_TIMEZONE = timezone(timedelta(hours=3))
 HERE = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = HERE / "data"
@@ -918,6 +920,658 @@ def official_progress_metadata(
     return deepcopy(value)
 
 
+def reference_union_sha256(references: Iterable[str]) -> str:
+    """Hash one canonical sorted reference set using the official ledger format."""
+
+    canonical = sorted({str(reference) for reference in references})
+    payload = ("\n".join(canonical) + ("\n" if canonical else "")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _reference_list(value: Any, *, label: str) -> list[str]:
+    parsed = parse_json_value(value)
+    if not isinstance(parsed, list) or any(
+        reference in (None, "") or isinstance(reference, (dict, list, bool))
+        for reference in parsed
+    ):
+        raise RuntimeError(f"{label} references_json must be a JSON scalar list")
+    return [str(reference) for reference in parsed]
+
+
+def _json_list(value: Any, *, label: str) -> list[Any]:
+    parsed = parse_json_value(value)
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"{label} must be a JSON list")
+    return parsed
+
+
+def _json_object(value: Any, *, label: str) -> dict[str, Any]:
+    parsed = parse_json_value(value)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{label} must be a JSON object")
+    return parsed
+
+
+def _resolve_official_raw_file(
+    warehouse_root: Path,
+    raw_path: Any,
+    *,
+    label: str,
+) -> tuple[str, Path]:
+    raw_text = str(raw_path or "").strip()
+    relative = Path(raw_text)
+    if not raw_text or relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"{label} RAW path is unsafe or missing")
+    prefix = ("data", "official_warehouse")
+    relative_parts = relative.parts
+    if relative_parts[: len(prefix)] == prefix:
+        relative = Path(*relative_parts[len(prefix) :])
+    resolved_root = warehouse_root.resolve()
+    resolved = (resolved_root / relative).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} RAW path escapes the official warehouse") from exc
+    if not resolved.is_file():
+        raise RuntimeError(f"{label} RAW file is missing: {raw_text}")
+    return raw_text, resolved
+
+
+def _verify_official_raw_pointer(
+    warehouse_root: Path,
+    raw_path: Any,
+    expected_sha256: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Resolve one official pointer under the warehouse and hash its real bytes."""
+
+    raw_text, resolved = _resolve_official_raw_file(
+        warehouse_root,
+        raw_path,
+        label=label,
+    )
+    sha_text = str(expected_sha256 or "").strip().lower()
+    digest = hashlib.sha256()
+    byte_count = 0
+    with resolved.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    if not re.fullmatch(r"[0-9a-f]{64}", sha_text) or digest.hexdigest() != sha_text:
+        raise RuntimeError(f"{label} RAW SHA-256 mismatch: {raw_text}")
+    return {
+        "raw_path": raw_text,
+        "sha256": sha_text,
+        "bytes": byte_count,
+    }
+
+
+def _verify_boundary_raw_payload(
+    warehouse_root: Path,
+    capture: dict[str, Any],
+    *,
+    label: str,
+) -> None:
+    """Parse the verified boundary RAW body and replay its page-1 semantics."""
+
+    _, resolved = _resolve_official_raw_file(
+        warehouse_root,
+        capture.get("raw_path"),
+        label=label,
+    )
+    try:
+        payload = json.loads(resolved.read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} RAW body is not valid JSON") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise RuntimeError(f"{label} RAW body has no data list")
+    rows = payload["data"]
+    references: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("referenceNumber") in (None, ""):
+            raise RuntimeError(f"{label} RAW row has no referenceNumber")
+        references.append(str(row["referenceNumber"]))
+    if (
+        payload.get("totalCount") != capture.get("total_count")
+        or payload.get("currentPage") != 1
+        or payload.get("pageSize") != 24
+        or len(rows) != capture.get("records")
+        or references != capture.get("references")
+    ):
+        raise RuntimeError(f"{label} RAW body differs from its boundary descriptor")
+
+
+def load_active_scan_authority(
+    database: Path,
+    active_scan: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build independently checkable hybrid-union evidence from SQLite ledgers."""
+
+    date_progress = active_scan.get("date_fallback")
+    if not isinstance(date_progress, dict) or date_progress.get("schema_version") != 3:
+        return None
+    if date_progress.get("mode") != "official_active_hybrid_union":
+        raise RuntimeError("schema-3 active scan mode must be official_active_hybrid_union")
+    cycle_id = str(date_progress.get("cycle_id") or "")
+    generation = date_progress.get("generation")
+    bootstrap = date_progress.get("bootstrap")
+    if not cycle_id:
+        raise RuntimeError("schema-3 active scan cycle_id is missing")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise RuntimeError("schema-3 active scan generation is invalid")
+    if not isinstance(bootstrap, dict):
+        raise RuntimeError("schema-3 active scan bootstrap status is missing")
+    pass_number = bootstrap.get("pass_number")
+    if not isinstance(pass_number, int) or isinstance(pass_number, bool) or pass_number < 1:
+        raise RuntimeError("schema-3 active scan bootstrap pass_number is invalid")
+
+    uri = f"file:{database.resolve()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        required_columns = {
+            "cycle_id",
+            "pass_number",
+            "page_number",
+            "sha256",
+            "raw_path",
+            "records",
+            "total_count",
+            "references_json",
+        }
+        if not required_columns.issubset(table_columns(connection, "active_scan_pages")):
+            raise RuntimeError(
+                "schema-3 active scan requires active_scan_pages.references_json ledger"
+            )
+        bootstrap_rows = connection.execute(
+            """
+            SELECT page_number,records,total_count,raw_path,sha256,references_json
+            FROM active_scan_pages
+            WHERE cycle_id=? AND pass_number=?
+            ORDER BY page_number,sha256
+            """,
+            (cycle_id, pass_number),
+        ).fetchall()
+        bootstrap_refs: list[str] = []
+        bootstrap_pages: list[dict[str, Any]] = []
+        for row in bootstrap_rows:
+            references = _reference_list(
+                row["references_json"],
+                label=f"active bootstrap page {row['page_number']}",
+            )
+            bootstrap_refs.extend(references)
+            bootstrap_pages.append(
+                {
+                    "page_number": int(row["page_number"]),
+                    "records": int(row["records"]),
+                    "total_count": int(row["total_count"]),
+                    "raw_path": str(row["raw_path"]),
+                    "sha256": str(row["sha256"]),
+                    "references": references,
+                }
+            )
+
+        date_page_columns = {
+            "cycle_id",
+            "range_id",
+            "generation",
+            "page_number",
+            "total_count",
+            "records",
+            "raw_path",
+            "sha256",
+            "references_json",
+        }
+        if not date_page_columns.issubset(
+            table_columns(connection, "active_scan_date_pages")
+        ):
+            raise RuntimeError("schema-3 active scan date-page ledger is incomplete")
+        date_range_columns = {
+            "cycle_id",
+            "range_id",
+            "from_day",
+            "to_day",
+            "parent_range_id",
+            "depth",
+            "state",
+            "next_page",
+            "total_count",
+            "generation",
+            "boundary_total_count",
+            "boundary_ref_sha256",
+            "domain_matches_boundary",
+            "closing_boundary_total_count",
+            "closing_boundary_ref_sha256",
+            "closing_boundary_generation",
+            "closing_boundary_matches",
+            "scanned_high_watermark",
+            "convergence_union_sha256",
+            "convergence_passes",
+            "convergence_last_generation",
+            "bootstrap_pass_number",
+            "opening_filtered_ref_sha256",
+            "closing_filtered_ref_sha256",
+        }
+        if date_range_columns.issubset(
+            table_columns(connection, "active_scan_date_ranges")
+        ):
+            range_rows = connection.execute(
+                """
+                SELECT range_id,from_day,to_day,parent_range_id,depth,state,next_page,
+                       total_count,generation,boundary_total_count,boundary_ref_sha256,
+                       domain_matches_boundary,closing_boundary_total_count,
+                       closing_boundary_ref_sha256,closing_boundary_generation,
+                       closing_boundary_matches,scanned_high_watermark,
+                       convergence_union_sha256,convergence_passes,
+                       convergence_last_generation,bootstrap_pass_number,
+                       opening_filtered_ref_sha256,closing_filtered_ref_sha256
+                FROM active_scan_date_ranges
+                WHERE cycle_id=?
+                ORDER BY from_day,to_day,depth,range_id
+                """,
+                (cycle_id,),
+            ).fetchall()
+            date_rows = connection.execute(
+                """
+                SELECT p.range_id,p.page_number,p.records,p.total_count,p.raw_path,p.sha256,
+                       p.references_json,r.state AS range_state
+                FROM active_scan_date_pages p
+                JOIN active_scan_date_ranges r
+                  ON r.cycle_id=p.cycle_id AND r.range_id=p.range_id
+                 AND r.generation=p.generation
+                WHERE p.cycle_id=?
+                ORDER BY p.range_id,p.page_number
+                """,
+                (cycle_id,),
+            ).fetchall()
+        else:
+            raise RuntimeError("schema-3 active scan date-range ledger is incomplete")
+        date_ranges = [
+            {
+                "range_id": str(row["range_id"]),
+                "from_day": str(row["from_day"]),
+                "to_day": str(row["to_day"]),
+                "parent_range_id": row["parent_range_id"],
+                "depth": int(row["depth"]),
+                "state": str(row["state"]),
+                "next_page": int(row["next_page"]),
+                "total_count": (
+                    int(row["total_count"])
+                    if row["total_count"] is not None
+                    else None
+                ),
+                "generation": int(row["generation"]),
+                "boundary_total_count": (
+                    int(row["boundary_total_count"])
+                    if row["boundary_total_count"] is not None
+                    else None
+                ),
+                "boundary_ref_sha256": row["boundary_ref_sha256"],
+                "domain_matches_boundary": bool(row["domain_matches_boundary"]),
+                "closing_boundary_total_count": (
+                    int(row["closing_boundary_total_count"])
+                    if row["closing_boundary_total_count"] is not None
+                    else None
+                ),
+                "closing_boundary_ref_sha256": row["closing_boundary_ref_sha256"],
+                "closing_boundary_generation": (
+                    int(row["closing_boundary_generation"])
+                    if row["closing_boundary_generation"] is not None
+                    else None
+                ),
+                "closing_boundary_matches": bool(row["closing_boundary_matches"]),
+                "scanned_high_watermark": int(row["scanned_high_watermark"]),
+                "convergence_union_sha256": row["convergence_union_sha256"],
+                "convergence_passes": int(row["convergence_passes"]),
+                "convergence_last_generation": (
+                    int(row["convergence_last_generation"])
+                    if row["convergence_last_generation"] is not None
+                    else None
+                ),
+                "bootstrap_pass_number": (
+                    int(row["bootstrap_pass_number"])
+                    if row["bootstrap_pass_number"] is not None
+                    else None
+                ),
+                "opening_filtered_ref_sha256": row["opening_filtered_ref_sha256"],
+                "closing_filtered_ref_sha256": row["closing_filtered_ref_sha256"],
+            }
+            for row in range_rows
+        ]
+        root_ranges = [
+            row for row in date_ranges if row["parent_range_id"] is None
+        ]
+        if len(root_ranges) != 1:
+            raise RuntimeError("schema-3 active scan must have exactly one date root")
+        date_root = root_ranges[0]
+        date_refs: list[str] = []
+        date_pages: list[dict[str, Any]] = []
+        for row in date_rows:
+            references = _reference_list(
+                row["references_json"],
+                label=(
+                    f"active date range {row['range_id']} page {row['page_number']}"
+                ),
+            )
+            if row["range_state"] == "leaf_exact":
+                date_refs.extend(references)
+            date_pages.append(
+                {
+                    "range_id": str(row["range_id"]),
+                    "range_state": str(row["range_state"]),
+                    "page_number": int(row["page_number"]),
+                    "records": int(row["records"]),
+                    "total_count": int(row["total_count"]),
+                    "raw_path": str(row["raw_path"]),
+                    "sha256": str(row["sha256"]),
+                    "references": references,
+                }
+            )
+
+        residual_columns = {
+            "cycle_id",
+            "generation",
+            "reference_number",
+            "state",
+            "status_id",
+            "raw_path",
+            "sha256",
+            "run_id",
+            "checked_at",
+            "attempts",
+            "error",
+        }
+        if not residual_columns.issubset(
+            table_columns(connection, "active_scan_residual_checks")
+        ):
+            raise RuntimeError("schema-3 active scan residual-check ledger is incomplete")
+        residual_rows = connection.execute(
+            """
+            SELECT reference_number,state,status_id,raw_path,sha256,run_id,
+                   checked_at,attempts,error
+            FROM active_scan_residual_checks
+            WHERE cycle_id=? AND generation=?
+            ORDER BY reference_number
+            """,
+            (cycle_id, generation),
+        ).fetchall()
+        residual_checks = [
+            {
+                "reference_number": str(row["reference_number"]),
+                "state": str(row["state"]),
+                "status_id": (
+                    int(row["status_id"]) if row["status_id"] is not None else None
+                ),
+                "raw_path": row["raw_path"],
+                "sha256": row["sha256"],
+                "run_id": row["run_id"],
+                "checked_at": row["checked_at"],
+                "attempts": int(row["attempts"]),
+                "error": row["error"],
+            }
+            for row in residual_rows
+        ]
+
+        proof_columns = {
+            "cycle_id",
+            "bootstrap_pass_number",
+            "generation",
+            "convergence_ordinal",
+            "date_unique",
+            "date_union_sha256",
+            "residual_unique",
+            "residual_union_sha256",
+            "union_unique",
+            "union_sha256",
+            "bootstrap_union_sha256",
+            "opening_filtered_total_count",
+            "opening_filtered_ref_sha256",
+            "closing_filtered_total_count",
+            "closing_filtered_ref_sha256",
+            "opening_boundary_total_count",
+            "opening_boundary_ref_sha256",
+            "closing_boundary_total_count",
+            "closing_boundary_ref_sha256",
+            "date_references_json",
+            "residual_references_json",
+            "union_references_json",
+            "range_generations_json",
+            "page_evidence_json",
+            "residual_evidence_json",
+            "boundary_evidence_json",
+            "run_id",
+            "closed_at",
+        }
+        if not proof_columns.issubset(
+            table_columns(connection, "active_scan_date_generation_proofs")
+        ):
+            raise RuntimeError(
+                "schema-3 active scan generation-proof ledger is incomplete"
+            )
+        proof_rows = connection.execute(
+            """
+            SELECT * FROM active_scan_date_generation_proofs
+            WHERE cycle_id=? AND bootstrap_pass_number=?
+            ORDER BY generation,convergence_ordinal
+            """,
+            (cycle_id, pass_number),
+        ).fetchall()
+        generation_proofs = [
+            {
+                "bootstrap_pass_number": int(row["bootstrap_pass_number"]),
+                "generation": int(row["generation"]),
+                "convergence_ordinal": int(row["convergence_ordinal"]),
+                "date_unique": int(row["date_unique"]),
+                "date_union_sha256": str(row["date_union_sha256"]),
+                "residual_unique": int(row["residual_unique"]),
+                "residual_union_sha256": str(row["residual_union_sha256"]),
+                "union_unique": int(row["union_unique"]),
+                "union_sha256": str(row["union_sha256"]),
+                "bootstrap_union_sha256": str(row["bootstrap_union_sha256"]),
+                "opening_filtered_total_count": int(
+                    row["opening_filtered_total_count"]
+                ),
+                "opening_filtered_ref_sha256": str(
+                    row["opening_filtered_ref_sha256"]
+                ),
+                "closing_filtered_total_count": int(
+                    row["closing_filtered_total_count"]
+                ),
+                "closing_filtered_ref_sha256": str(
+                    row["closing_filtered_ref_sha256"]
+                ),
+                "opening_boundary_total_count": int(
+                    row["opening_boundary_total_count"]
+                ),
+                "opening_boundary_ref_sha256": str(
+                    row["opening_boundary_ref_sha256"]
+                ),
+                "closing_boundary_total_count": int(
+                    row["closing_boundary_total_count"]
+                ),
+                "closing_boundary_ref_sha256": str(
+                    row["closing_boundary_ref_sha256"]
+                ),
+                "date_references": _reference_list(
+                    row["date_references_json"],
+                    label="active generation proof date",
+                ),
+                "residual_references": _reference_list(
+                    row["residual_references_json"],
+                    label="active generation proof residual",
+                ),
+                "union_references": _reference_list(
+                    row["union_references_json"],
+                    label="active generation proof union",
+                ),
+                "range_generations": _json_list(
+                    row["range_generations_json"],
+                    label="active generation proof ranges",
+                ),
+                "page_evidence": _json_list(
+                    row["page_evidence_json"],
+                    label="active generation proof pages",
+                ),
+                "residual_evidence": _json_list(
+                    row["residual_evidence_json"],
+                    label="active generation proof residual evidence",
+                ),
+                "boundary_evidence": _json_object(
+                    row["boundary_evidence_json"],
+                    label="active generation proof boundary evidence",
+                ),
+                "run_id": str(row["run_id"]),
+                "closed_at": str(row["closed_at"]),
+            }
+            for row in proof_rows
+        ]
+    finally:
+        connection.close()
+
+    warehouse_root = database.resolve().parent
+    raw_verification_by_path: dict[str, dict[str, Any]] = {}
+
+    def verify_raw(raw_path: Any, sha256: Any, *, label: str) -> None:
+        descriptor = _verify_official_raw_pointer(
+            warehouse_root,
+            raw_path,
+            sha256,
+            label=label,
+        )
+        previous = raw_verification_by_path.get(descriptor["raw_path"])
+        if previous is not None and previous != descriptor:
+            raise RuntimeError(f"{label} RAW pointer has conflicting evidence")
+        raw_verification_by_path[descriptor["raw_path"]] = descriptor
+
+    for page in bootstrap_pages:
+        verify_raw(
+            page["raw_path"],
+            page["sha256"],
+            label=f"active bootstrap page {page['page_number']}",
+        )
+    for page in date_pages:
+        verify_raw(
+            page["raw_path"],
+            page["sha256"],
+            label=(
+                f"active date range {page['range_id']} page {page['page_number']}"
+            ),
+        )
+    for row in residual_checks:
+        if row["raw_path"] not in (None, "") or row["sha256"] not in (None, ""):
+            verify_raw(
+                row["raw_path"],
+                row["sha256"],
+                label=f"active residual {row['reference_number']}",
+            )
+    for proof in generation_proofs:
+        proof_generation = proof["generation"]
+        proof_pages = proof["page_evidence"]
+        proof_residual = proof["residual_evidence"]
+        boundary = proof["boundary_evidence"]
+        if not isinstance(proof_pages, list) or not isinstance(proof_residual, list):
+            raise RuntimeError("active generation proof evidence must be a list")
+        if not isinstance(boundary, dict):
+            raise RuntimeError("active generation boundary proof must be an object")
+        for page in proof_pages:
+            if not isinstance(page, dict):
+                raise RuntimeError("active generation proof page must be an object")
+            verify_raw(
+                page.get("raw_path"),
+                page.get("sha256"),
+                label=f"active generation {proof_generation} page",
+            )
+        for row in proof_residual:
+            if not isinstance(row, dict):
+                raise RuntimeError("active generation residual proof must be an object")
+            verify_raw(
+                row.get("raw_path"),
+                row.get("sha256"),
+                label=f"active generation {proof_generation} residual",
+            )
+        for phase in ("opening", "closing"):
+            phase_evidence = boundary.get(phase)
+            if not isinstance(phase_evidence, dict):
+                raise RuntimeError(
+                    f"active generation {proof_generation} {phase} boundary is missing"
+                )
+            for lane in ("filtered", "unfiltered"):
+                capture = phase_evidence.get(lane)
+                if not isinstance(capture, dict):
+                    raise RuntimeError(
+                        f"active generation {proof_generation} {phase} {lane} "
+                        "boundary is missing"
+                    )
+                verify_raw(
+                    capture.get("raw_path"),
+                    capture.get("sha256"),
+                    label=(
+                        f"active generation {proof_generation} {phase} {lane} boundary"
+                    ),
+                )
+                _verify_boundary_raw_payload(
+                    warehouse_root,
+                    capture,
+                    label=(
+                        f"active generation {proof_generation} {phase} {lane} boundary"
+                    ),
+                )
+
+    active_residual_refs = [
+        row["reference_number"]
+        for row in residual_checks
+        if row["state"] == "verified_active"
+        and row["status_id"] == 4
+        and row["error"] in (None, "")
+    ]
+    union_refs = sorted(set(date_refs).union(active_residual_refs))
+    bootstrap_head_refs: list[str] = next(
+        (
+            page["references"]
+            for page in bootstrap_pages
+            if page["page_number"] == 1
+        ),
+        [],
+    )
+    raw_verification_files = [
+        raw_verification_by_path[path]
+        for path in sorted(raw_verification_by_path)
+    ]
+    return {
+        "schema_version": ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION,
+        "cycle_id": cycle_id,
+        "generation": generation,
+        "raw_verification": {
+            "mode": "export_time_official_warehouse_bytes",
+            "verified_files": len(raw_verification_files),
+            "verified_bytes": sum(item["bytes"] for item in raw_verification_files),
+            "files": raw_verification_files,
+        },
+        "bootstrap": {
+            "pass_number": pass_number,
+            "pages": bootstrap_pages,
+            "references": sorted(bootstrap_refs),
+            "head_ref_sha256": reference_union_sha256(bootstrap_head_refs),
+            "union_sha256": reference_union_sha256(bootstrap_refs),
+        },
+        "date_partition": {
+            "generation": generation,
+            "root": date_root,
+            "ranges": date_ranges,
+            "pages": date_pages,
+            "references": sorted(date_refs),
+            "union_sha256": reference_union_sha256(date_refs),
+        },
+        "residual_checks": residual_checks,
+        "generation_proofs": generation_proofs,
+        "authoritative_union": {
+            "references": union_refs,
+            "union_sha256": reference_union_sha256(union_refs),
+        },
+    }
+
+
 def database_times(connection: sqlite3.Connection) -> dict[str, Any]:
     result: dict[str, Any] = {
         "official": None,
@@ -1803,6 +2457,7 @@ def build_datasets(out: Path, awarded_partial: bool) -> list[dict[str, Any]]:
 def build(args: argparse.Namespace) -> dict[str, Any]:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    authority_path = out / ACTIVE_SCAN_AUTHORITY_FILE
     no_plus = bool(getattr(args, "no_plus", False))
     phase0_lock_path = getattr(args, "phase0_lock", None)
     if no_plus and phase0_lock_path is None:
@@ -2083,6 +2738,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "phase0FreshnessBasis": phase0_freshness_basis,
     }
     phase0_status = phase0_acquisition_status(fetch_status, source_times)
+    active_scan_status = official_progress_metadata(database_metadata, "active_scan")
     canonical_status = {
         "schema_version": SCHEMA_VERSION,
         "source": "etimad_official_periodic",
@@ -2099,7 +2755,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         },
         "phase0_acquisition": phase0_status,
         "obtained": obtained,
-        "active_scan": official_progress_metadata(database_metadata, "active_scan"),
+        "active_scan": active_scan_status,
         "region_backfill": official_progress_metadata(
             database_metadata,
             "region_backfill",
@@ -2116,7 +2772,39 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "unknownDeadlineExcluded": True,
         },
     }
+    authority_payload = (
+        load_active_scan_authority(Path(official_db), active_scan_status)
+        if official_db
+        else None
+    )
+    if authority_payload is not None:
+        authority_descriptor = write_asset(
+            out,
+            ACTIVE_SCAN_AUTHORITY_FILE,
+            authority_payload,
+            role="active_scan_authority_evidence",
+        )
+        assets[ACTIVE_SCAN_AUTHORITY_FILE] = authority_descriptor
+        date_fallback = active_scan_status.get("date_fallback")
+        assert isinstance(date_fallback, dict)
+        date_fallback["evidence_asset"] = {
+            "schema_version": ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION,
+            "file": ACTIVE_SCAN_AUTHORITY_FILE,
+            "bytes": authority_descriptor["bytes"],
+            "sha256": authority_descriptor["sha256"],
+        }
+    elif authority_path.exists():
+        authority_path.unlink()
+
     still_missing = dict(fetch_status.get("still_missing") or {})
+    date_fallback = active_scan_status.get("date_fallback")
+    active_scan_complete = bool(
+        active_scan_status.get("complete")
+        and (
+            not isinstance(date_fallback, dict)
+            or date_fallback.get("completion_authoritative") is True
+        )
+    )
     still_missing.update(
         {
             "official_universe_backfill": {
@@ -2133,6 +2821,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             },
         }
     )
+    if active_scan_complete:
+        still_missing.pop("active_refresh_sweep", None)
     canonical_status["still_missing"] = still_missing
     fetch_status = canonical_status
     assets["fetch_status.json"] = write_asset(

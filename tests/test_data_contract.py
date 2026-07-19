@@ -119,6 +119,15 @@ class RemoteContractTests(unittest.TestCase):
                         "records": rows,
                     },
                 )
+            write_asset(
+                "fetch_status.json",
+                {
+                    "active_scan": {
+                        "available": False,
+                        "reason": "official_database_metadata_absent",
+                    }
+                },
+            )
 
             manifest = {
                 "schema": "kashaf.static-warehouse",
@@ -152,7 +161,7 @@ class RemoteContractTests(unittest.TestCase):
                 summary = check_remote(base_url, "remote-test", wait_seconds=0)
                 self.assertEqual(
                     summary["assets"],
-                    SHARD_COUNT + AWARDED_INDEX_PART_COUNT + 1,
+                    SHARD_COUNT + AWARDED_INDEX_PART_COUNT + 2,
                 )
                 self.assertEqual(summary["awarded"], 1)
 
@@ -167,6 +176,43 @@ class RemoteContractTests(unittest.TestCase):
 
                 stale = details / f"{target_shard:02d}.json"
                 stale.write_bytes(stale.read_bytes() + b" ")
+                with self.assertRaisesRegex(
+                    AssertionError, "remote snapshot did not converge"
+                ):
+                    check_remote(base_url, "remote-test", wait_seconds=0)
+                stale.write_bytes(stale.read_bytes()[:-1])
+
+                manifest["still_missing"] = {
+                    "active_refresh_sweep": {"complete": False}
+                }
+                (data / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "remote snapshot did not converge"
+                ):
+                    check_remote(base_url, "remote-test", wait_seconds=0)
+                manifest.pop("still_missing")
+
+                write_asset(
+                    "fetch_status.json",
+                    {
+                        "active_scan": {
+                            "denominator": 1,
+                            "targets_scanned_unique": 2,
+                            "targets_resolved_unique": 2,
+                            "targets_absent_after_full_pass": 0,
+                            "targets_remaining": 0,
+                            "scanned_percent": 200.0,
+                            "coverage_percent": 200.0,
+                            "absence_confirmation_passes": 2,
+                            "complete": True,
+                        }
+                    },
+                )
+                (data / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
                 with self.assertRaisesRegex(
                     AssertionError, "remote snapshot did not converge"
                 ):

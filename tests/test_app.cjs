@@ -65,6 +65,13 @@ test("existing tender deep links remain compatible", () => {
   assert.equal(route.explorer, null);
 });
 
+test("completed structured gaps are not rendered as still missing", () => {
+  assert.equal(app.isStillMissing({ complete: true }), false);
+  assert.equal(app.isStillMissing({ complete: false }), true);
+  assert.equal(app.isStillMissing(false), false);
+  assert.equal(app.isStillMissing("required"), true);
+});
+
 test("computedShard follows sha256 first-byte modulo algorithm", async () => {
   const ref = "260639008661";
   const expected = String(createHash("sha256").update(ref).digest()[0] % 64).padStart(2, "0");
