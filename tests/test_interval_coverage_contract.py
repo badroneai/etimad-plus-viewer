@@ -31,6 +31,48 @@ from test_cardinality_seal_contract import cardinality_fixture  # noqa: E402
 
 
 class IntervalCoverageContractTests(unittest.TestCase):
+    @staticmethod
+    def _sealed_temporal_reconciliation(*, generation: int = 2) -> dict:
+        history = [
+            {
+                "generation": historical_generation,
+                "union_unique": 121 + historical_generation,
+                "union_sha256": chr(96 + historical_generation) * 64,
+                "bijection_sha256": chr(100 + historical_generation) * 64,
+            }
+            for historical_generation in range(1, generation)
+        ]
+        baseline = history[-1]
+        return {
+            "version": 2,
+            "generation": generation,
+            "max_generation": 3,
+            "cells_total": 1,
+            "cells_generation_2": int(generation == 2),
+            "cells_generation_3": int(generation == 3),
+            "cells_collecting": 0,
+            "cells_awaiting_day_close": 0,
+            "cells_sealed": 1,
+            "cells_blocked": 0,
+            "closing_proofs_total": generation,
+            "closing_proofs_valid": generation,
+            "entries": [
+                {
+                    "cell_id": "cell-0-refined",
+                    "state": "sealed",
+                    "generation": generation,
+                    "generation_history": history,
+                    "baseline_union_unique": baseline["union_unique"],
+                    "baseline_union_sha256": baseline["union_sha256"],
+                    "baseline_bijection_sha256": baseline["bijection_sha256"],
+                    "generation_union_unique": baseline["union_unique"],
+                    "generation_union_sha256": baseline["union_sha256"],
+                    "generation_bijection_sha256": baseline["bijection_sha256"],
+                    "failure_reason": None,
+                }
+            ],
+        }
+
     def test_type_area_single_day_refinement_contract_is_replayable(self) -> None:
         progress = attach_covered_single_day_refinement(
             interval_coverage_progress()
@@ -216,6 +258,385 @@ class IntervalCoverageContractTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(
                 AssertionError, message
             ):
+                assert_active_interval_coverage_contract(progress)
+
+    def test_temporal_reconciliation_requires_converged_generation_and_proofs(
+        self,
+    ) -> None:
+        valid = attach_covered_single_day_refinement(interval_coverage_progress())
+        valid["single_day_refinement"]["temporal_reconciliation"] = (
+            self._sealed_temporal_reconciliation()
+        )
+        assert_active_interval_coverage_contract(valid)
+
+        valid_generation_three = deepcopy(valid)
+        valid_generation_three["single_day_refinement"]["temporal_reconciliation"] = (
+            self._sealed_temporal_reconciliation(generation=3)
+        )
+        assert_active_interval_coverage_contract(valid_generation_three)
+
+        cases: list[tuple[str, dict, str]] = []
+        legacy_version = deepcopy(valid)
+        legacy_version["single_day_refinement"]["temporal_reconciliation"][
+            "version"
+        ] = 1
+        cases.append(("legacy version", legacy_version, "version mismatch"))
+
+        missing = deepcopy(valid)
+        del missing["single_day_refinement"]["temporal_reconciliation"]
+        cases.append(("missing", missing, "status is missing or invalid"))
+
+        missing_proofs = deepcopy(valid)
+        missing_proofs["single_day_refinement"]["temporal_reconciliation"].update(
+            {"closing_proofs_total": 0, "closing_proofs_valid": 0}
+        )
+        cases.append(("missing proofs", missing_proofs, "fewer closing proofs"))
+
+        awaiting_without_proof = deepcopy(valid)
+        awaiting_reconciliation = awaiting_without_proof["single_day_refinement"][
+            "temporal_reconciliation"
+        ]
+        awaiting_reconciliation.update(
+            {
+                "cells_awaiting_day_close": 1,
+                "cells_sealed": 0,
+                "closing_proofs_total": 0,
+                "closing_proofs_valid": 0,
+            }
+        )
+        awaiting_reconciliation["entries"][0]["state"] = "awaiting_day_close"
+        cases.append(
+            (
+                "awaiting without proof",
+                awaiting_without_proof,
+                "fewer closing proofs",
+            )
+        )
+
+        generation_three_sealed_without_history_proof = deepcopy(
+            valid_generation_three
+        )
+        generation_three_sealed_without_history_proof["single_day_refinement"][
+            "temporal_reconciliation"
+        ].update({"closing_proofs_total": 2, "closing_proofs_valid": 2})
+        cases.append(
+            (
+                "generation three sealed without historical proof",
+                generation_three_sealed_without_history_proof,
+                "fewer closing proofs",
+            )
+        )
+
+        generation_three_awaiting_without_history_proof = deepcopy(
+            valid_generation_three
+        )
+        generation_three_awaiting = generation_three_awaiting_without_history_proof[
+            "single_day_refinement"
+        ]["temporal_reconciliation"]
+        generation_three_awaiting.update(
+            {
+                "cells_awaiting_day_close": 1,
+                "cells_sealed": 0,
+                "closing_proofs_total": 1,
+                "closing_proofs_valid": 1,
+            }
+        )
+        generation_three_awaiting["entries"][0]["state"] = "awaiting_day_close"
+        cases.append(
+            (
+                "generation three awaiting without historical proof",
+                generation_three_awaiting_without_history_proof,
+                "fewer closing proofs",
+            )
+        )
+
+        generation_three_collecting_without_history_proof = deepcopy(
+            valid_generation_three
+        )
+        generation_three_collecting = generation_three_collecting_without_history_proof[
+            "single_day_refinement"
+        ]["temporal_reconciliation"]
+        generation_three_collecting.update(
+            {
+                "cells_collecting": 1,
+                "cells_sealed": 0,
+                "closing_proofs_total": 0,
+                "closing_proofs_valid": 0,
+            }
+        )
+        generation_three_collecting["entries"][0].update(
+            {
+                "state": "collecting_generation",
+                "generation_union_unique": None,
+                "generation_union_sha256": None,
+                "generation_bijection_sha256": None,
+            }
+        )
+        cases.append(
+            (
+                "generation three collecting without historical proof",
+                generation_three_collecting_without_history_proof,
+                "fewer closing proofs",
+            )
+        )
+
+        missing_history = deepcopy(valid)
+        del missing_history["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["generation_history"]
+        cases.append(
+            ("missing history", missing_history, "history is missing or invalid")
+        )
+
+        malformed_history = deepcopy(valid_generation_three)
+        malformed_history["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["generation_history"].pop()
+        cases.append(
+            ("malformed history", malformed_history, "history sequence mismatch")
+        )
+
+        driftless_generation_three = deepcopy(valid_generation_three)
+        driftless_history = driftless_generation_three["single_day_refinement"][
+            "temporal_reconciliation"
+        ]["entries"][0]["generation_history"]
+        driftless_history[1].update(
+            {
+                key: driftless_history[0][key]
+                for key in ("union_unique", "union_sha256", "bijection_sha256")
+            }
+        )
+        cases.append(
+            (
+                "driftless generation three",
+                driftless_generation_three,
+                "history has no drift",
+            )
+        )
+
+        stale_baseline = deepcopy(valid_generation_three)
+        stale_baseline["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["baseline_union_sha256"] = "f" * 64
+        cases.append(
+            ("stale baseline", stale_baseline, "does not match generation history")
+        )
+
+        forged_identity = deepcopy(valid)
+        forged_identity["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["cell_id"] = "forged-covered-cell"
+        cases.append(
+            (
+                "forged sealed identity",
+                forged_identity,
+                "not a refined covered interval",
+            )
+        )
+
+        forged_blocked_identity = deepcopy(valid)
+        blocked_interval = forged_blocked_identity["coverage"]["intervals"][0]
+        blocked_interval.update(
+            {
+                "state": "terminal_gap",
+                "terminal_reason": "single_day_type_refinement_blocked:fixture",
+            }
+        )
+        blocked_coverage = forged_blocked_identity["coverage"]
+        blocked_coverage["units_covered"] -= 1
+        blocked_coverage["units_gap"] += 1
+        blocked_coverage["leaves_covered"] -= 1
+        blocked_coverage["leaves_gap"] += 1
+        blocked_coverage["coverage_percent"] = round(
+            100.0
+            * blocked_coverage["units_covered"]
+            / (
+                blocked_coverage["units_covered"]
+                + blocked_coverage["units_gap"]
+                + blocked_coverage["units_pending"]
+            ),
+            6,
+        )
+        blocked_coverage["complete"] = False
+        forged_blocked_identity["phase"] = "complete_with_gaps"
+        blocked_refinement = single_day_refinement_status(state="blocked")
+        blocked_refinement["temporal_reconciliation"] = {
+            "version": 2,
+            "generation": 2,
+            "max_generation": 3,
+            "cells_total": 1,
+            "cells_generation_2": 1,
+            "cells_generation_3": 0,
+            "cells_collecting": 0,
+            "cells_awaiting_day_close": 0,
+            "cells_sealed": 0,
+            "cells_blocked": 1,
+            "closing_proofs_total": 0,
+            "closing_proofs_valid": 0,
+            "entries": [
+                {
+                    "cell_id": "forged-blocked-cell",
+                    "state": "blocked",
+                    "generation": 2,
+                    "generation_history": [
+                        {
+                            "generation": 1,
+                            "union_unique": 122,
+                            "union_sha256": "a" * 64,
+                            "bijection_sha256": "b" * 64,
+                        }
+                    ],
+                    "baseline_union_unique": 122,
+                    "baseline_union_sha256": "a" * 64,
+                    "baseline_bijection_sha256": "b" * 64,
+                    "generation_union_unique": None,
+                    "generation_union_sha256": None,
+                    "generation_bijection_sha256": None,
+                    "failure_reason": "fixture",
+                }
+            ],
+        }
+        forged_blocked_identity["single_day_refinement"] = blocked_refinement
+        cases.append(
+            (
+                "forged blocked identity",
+                forged_blocked_identity,
+                "not a refined terminal-gap interval",
+            )
+        )
+
+        forged_blocked_reason = deepcopy(forged_blocked_identity)
+        forged_blocked_reason_entry = forged_blocked_reason[
+            "single_day_refinement"
+        ]["temporal_reconciliation"]["entries"][0]
+        forged_blocked_reason_entry["cell_id"] = "cell-0-refined"
+        forged_blocked_reason_entry["failure_reason"] = "forged_reason"
+        cases.append(
+            (
+                "forged blocked reason only",
+                forged_blocked_reason,
+                "failure reason does not match terminal interval",
+            )
+        )
+
+        partial_blocked_generation = deepcopy(forged_blocked_identity)
+        partial_blocked_entry = partial_blocked_generation["single_day_refinement"][
+            "temporal_reconciliation"
+        ]["entries"][0]
+        partial_blocked_entry["cell_id"] = "cell-0-refined"
+        partial_blocked_entry["generation_union_unique"] = 122
+        cases.append(
+            (
+                "partial blocked generation",
+                partial_blocked_generation,
+                "has partial generation values",
+            )
+        )
+
+        garbage_blocked_generation = deepcopy(forged_blocked_identity)
+        garbage_blocked_entry = garbage_blocked_generation["single_day_refinement"][
+            "temporal_reconciliation"
+        ]["entries"][0]
+        garbage_blocked_entry.update(
+            {
+                "cell_id": "cell-0-refined",
+                "generation_union_unique": "122",
+                "generation_union_sha256": "not-a-sha",
+                "generation_bijection_sha256": "not-a-sha",
+            }
+        )
+        cases.append(
+            (
+                "garbage blocked generation",
+                garbage_blocked_generation,
+                "cardinality is invalid",
+            )
+        )
+
+        generation_three_blocked_without_history_proof = deepcopy(
+            forged_blocked_identity
+        )
+        generation_three_blocked = generation_three_blocked_without_history_proof[
+            "single_day_refinement"
+        ]["temporal_reconciliation"]
+        generation_three_blocked.update(
+            {
+                "generation": 3,
+                "cells_generation_2": 0,
+                "cells_generation_3": 1,
+            }
+        )
+        generation_three_blocked_entry = generation_three_blocked["entries"][0]
+        generation_three_blocked_entry.update(
+            {
+                "cell_id": "cell-0-refined",
+                "generation": 3,
+                "generation_history": [
+                    *generation_three_blocked_entry["generation_history"],
+                    {
+                        "generation": 2,
+                        "union_unique": 123,
+                        "union_sha256": "c" * 64,
+                        "bijection_sha256": "d" * 64,
+                    },
+                ],
+                "baseline_union_unique": 123,
+                "baseline_union_sha256": "c" * 64,
+                "baseline_bijection_sha256": "d" * 64,
+            }
+        )
+        cases.append(
+            (
+                "generation three blocked without historical proof",
+                generation_three_blocked_without_history_proof,
+                "fewer closing proofs",
+            )
+        )
+
+        wrong_generation = deepcopy(valid)
+        wrong_generation["single_day_refinement"]["temporal_reconciliation"]["generation"] = 3
+        cases.append(("generation", wrong_generation, "generation maximum mismatch"))
+
+        changed_union = deepcopy(valid)
+        changed_union["single_day_refinement"]["temporal_reconciliation"]["entries"][0][
+            "generation_union_sha256"
+        ] = "c" * 64
+        cases.append(("union", changed_union, "union did not converge"))
+
+        changed_bijection = deepcopy(valid)
+        changed_bijection["single_day_refinement"]["temporal_reconciliation"]["entries"][0][
+            "generation_bijection_sha256"
+        ] = "c" * 64
+        cases.append(("bijection", changed_bijection, "bijection did not converge"))
+
+        invalid_proof = deepcopy(valid)
+        invalid_proof["single_day_refinement"]["temporal_reconciliation"][
+            "closing_proofs_valid"
+        ] = 1
+        cases.append(("proof", invalid_proof, "invalid closing proofs"))
+
+        unfinished = deepcopy(valid)
+        reconciliation = unfinished["single_day_refinement"]["temporal_reconciliation"]
+        reconciliation.update(
+            {
+                "cells_collecting": 1,
+                "cells_sealed": 0,
+                "closing_proofs_total": 0,
+                "closing_proofs_valid": 0,
+            }
+        )
+        reconciliation["entries"][0].update(
+            {
+                "state": "collecting_generation",
+                "generation_union_unique": None,
+                "generation_union_sha256": None,
+                "generation_bijection_sha256": None,
+            }
+        )
+        cases.append(("unfinished", unfinished, "still collecting"))
+
+        for name, progress, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(AssertionError, message):
                 assert_active_interval_coverage_contract(progress)
 
     def test_terminal_refinement_rejects_unfinished_or_conflicting_state(

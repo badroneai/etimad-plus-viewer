@@ -86,6 +86,21 @@ def single_day_refinement_status(
         "identity_conflicts": [],
         "duplicate_observations": 2,
         "overlap_count": 0,
+        "temporal_reconciliation": {
+            "version": 2,
+            "generation": 2,
+            "max_generation": 3,
+            "cells_total": 0,
+            "cells_generation_2": 0,
+            "cells_generation_3": 0,
+            "cells_collecting": 0,
+            "cells_awaiting_day_close": 0,
+            "cells_sealed": 0,
+            "cells_blocked": 0,
+            "closing_proofs_total": 0,
+            "closing_proofs_valid": 0,
+            "entries": [],
+        },
     }
 
 
