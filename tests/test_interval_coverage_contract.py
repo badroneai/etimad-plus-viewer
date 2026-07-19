@@ -73,6 +73,135 @@ class IntervalCoverageContractTests(unittest.TestCase):
             ],
         }
 
+    @staticmethod
+    def _terminal_mirror_evidence(
+        *,
+        state: str = "covered",
+        generation: int = 2,
+    ) -> dict:
+        if state not in {"covered", "blocked"}:
+            raise ValueError("unsupported terminal mirror fixture state")
+        return {
+            "version": 1,
+            "strategy": "single_day_bidirectional_submission_cover_v1",
+            "query_hash": (
+                "fb4de883da302089b8f30490a62431af6aea76ac3de86e3714105cee1d628d48"
+            ),
+            "state": state,
+            "generation": generation,
+            "baseline_generation": generation - 1,
+            "generation_evidence_sha256": [
+                chr(96 + index) * 64 for index in range(1, generation + 1)
+            ],
+            "final_total_count": 79,
+            "final_union_sha256": "e" * 64,
+            "final_bijection_sha256": "f" * 64,
+        }
+
+    @staticmethod
+    def _failed_mirror_evidence() -> dict:
+        return {
+            "version": 1,
+            "strategy": "single_day_bidirectional_submission_cover_v1",
+            "query_hash": (
+                "fb4de883da302089b8f30490a62431af6aea76ac3de86e3714105cee1d628d48"
+            ),
+            "state": "failed",
+            "generation": 1,
+            "failed_direction": "DESC",
+            "failure_count": 2,
+            "failure_reason": "mirror_cover_capture_attempts_exhausted:fixture",
+            "generation_evidence_sha256": [],
+            "partial_pages": [],
+        }
+
+    @classmethod
+    def _covered_mirror_progress(cls, *, generation: int = 2) -> dict:
+        progress = attach_covered_single_day_refinement(
+            interval_coverage_progress()
+        )
+        refinement = progress["single_day_refinement"]
+        refinement["mirror_pages"] = 4 * generation
+        refinement["mirror_cover"].update(
+            {
+                "covers_total": 1,
+                "migrations_total": 1,
+                "covers_covered": 1,
+                "evidence": {
+                    "area-node-1": cls._terminal_mirror_evidence(
+                        generation=generation
+                    )
+                },
+            }
+        )
+        return progress
+
+    @classmethod
+    def _nonterminal_mirror_gap_progress(cls, *, state: str) -> dict:
+        if state not in {"blocked", "failed"}:
+            raise ValueError("unsupported mirror gap fixture state")
+        progress = attach_covered_single_day_refinement(
+            interval_coverage_progress(("covered",), raw_replay_valid=True)
+        )
+        coverage = progress["coverage"]
+        interval = coverage["intervals"][0]
+        reason = (
+            "mirror_cover_generation_3_nonconvergent"
+            if state == "blocked"
+            else "mirror_cover_capture_attempts_exhausted:fixture"
+        )
+        interval.update(
+            {
+                "state": "terminal_gap",
+                "terminal_reason": f"single_day_type_refinement_{state}:{reason}",
+            }
+        )
+        coverage["units_covered"] -= 1
+        coverage["units_gap"] += 1
+        coverage["leaves_covered"] -= 1
+        coverage["leaves_gap"] += 1
+        coverage["coverage_percent"] = round(
+            100.0
+            * coverage["units_covered"]
+            / (
+                coverage["units_covered"]
+                + coverage["units_gap"]
+                + coverage["units_pending"]
+            ),
+            6,
+        )
+        progress["frontier"]["covered"] -= 1
+        progress["frontier"]["gap"] += 1
+
+        refinement = single_day_refinement_status(state="blocked")
+        refinement.update(
+            {
+                "raw_replay_valid": True,
+                "raw_replay_error_count": 0,
+                "raw_replay_errors": [],
+                "mirror_pages": 12 if state == "blocked" else 0,
+                "max_page_requested": 2 if state == "blocked" else 0,
+            }
+        )
+        refinement["mirror_cover"].update(
+            {
+                "covers_total": 1,
+                f"covers_{state}": 1,
+                "evidence": {
+                    "area-node-1": (
+                        cls._terminal_mirror_evidence(
+                            state="blocked",
+                            generation=3,
+                        )
+                        if state == "blocked"
+                        else cls._failed_mirror_evidence()
+                    )
+                },
+            }
+        )
+        progress["single_day_refinement"] = refinement
+        return progress
+
     def test_type_area_single_day_refinement_contract_is_replayable(self) -> None:
         progress = attach_covered_single_day_refinement(
             interval_coverage_progress()
@@ -93,6 +222,253 @@ class IntervalCoverageContractTests(unittest.TestCase):
             "accepted": True
         }
         assert_active_interval_coverage_contract(future_compatible)
+
+    def test_mirror_pending_after_desc_pair_is_replayable_but_not_authority(
+        self,
+    ) -> None:
+        progress = interval_coverage_progress(("covered",), raw_replay_valid=True)
+        refinement = single_day_refinement_status(state="refining")
+        refinement.update(
+            {
+                "nodes_pending": 168,
+                "nodes_mirror_pending": 1,
+                "mirror_pages": 2,
+                "max_page_requested": 2,
+            }
+        )
+        refinement["mirror_cover"].update(
+            {
+                "covers_total": 1,
+                "migrations_total": 1,
+                "covers_pending": 1,
+            }
+        )
+        progress["single_day_refinement"] = refinement
+
+        assert_active_interval_coverage_contract(progress)
+        self.assertTrue(refinement["raw_replay_valid"])
+        self.assertFalse(progress["cycle_terminal"])
+        for key in (
+            "snapshot_authoritative",
+            "instantaneous_snapshot_authoritative",
+            "union_authoritative",
+            "partition_authoritative",
+            "absence_authoritative",
+            "completion_authoritative",
+        ):
+            self.assertFalse(progress[key])
+
+    def test_terminal_mirror_cover_accepts_matching_generation_two_or_three(
+        self,
+    ) -> None:
+        for generation in (2, 3):
+            with self.subTest(generation=generation):
+                progress = self._covered_mirror_progress(generation=generation)
+                assert_active_interval_coverage_contract(progress)
+                mirror = progress["single_day_refinement"]["mirror_cover"]
+                self.assertEqual(mirror["covers_total"], mirror["covers_covered"])
+                self.assertEqual(
+                    len(mirror["evidence"]["area-node-1"]["generation_evidence_sha256"]),
+                    generation,
+                )
+
+    def test_blocked_and_failed_cover_evidence_remain_honest_nonterminal_gaps(
+        self,
+    ) -> None:
+        for state in ("blocked", "failed"):
+            with self.subTest(state=state):
+                progress = self._nonterminal_mirror_gap_progress(state=state)
+                assert_active_interval_coverage_contract(progress)
+                self.assertFalse(progress["cycle_terminal"])
+                self.assertTrue(
+                    progress["single_day_refinement"]["raw_replay_valid"]
+                )
+                self.assertEqual(
+                    progress["single_day_refinement"]["mirror_cover"][
+                        f"covers_{state}"
+                    ],
+                    1,
+                )
+
+    def test_mirror_cover_counters_and_terminal_states_fail_closed(self) -> None:
+        valid = self._covered_mirror_progress()
+        cases: list[tuple[str, dict, str]] = []
+
+        bad_state_arithmetic = deepcopy(valid)
+        bad_state_arithmetic["single_day_refinement"]["mirror_cover"][
+            "covers_total"
+        ] = 2
+        cases.append(("state arithmetic", bad_state_arithmetic, "state arithmetic"))
+
+        bad_migration_arithmetic = deepcopy(valid)
+        bad_migration_arithmetic["single_day_refinement"]["mirror_cover"][
+            "migrations_total"
+        ] = 2
+        cases.append(
+            (
+                "migration arithmetic",
+                bad_migration_arithmetic,
+                "migration count exceeds covers",
+            )
+        )
+
+        bad_node_arithmetic = deepcopy(valid)
+        bad_node_arithmetic["single_day_refinement"].update(
+            {"nodes_mirror_pending": 1, "nodes_exact": 168}
+        )
+        cases.append(
+            (
+                "pending node arithmetic",
+                bad_node_arithmetic,
+                "pending-node arithmetic",
+            )
+        )
+
+        bad_page_arithmetic = deepcopy(valid)
+        bad_page_arithmetic["single_day_refinement"]["mirror_pages"] = 7
+        cases.append(("page arithmetic", bad_page_arithmetic, "page arithmetic"))
+
+        terminal_pending = deepcopy(valid)
+        pending_refinement = terminal_pending["single_day_refinement"]
+        pending_refinement.update(
+            {"nodes_exact": 168, "nodes_mirror_pending": 1, "mirror_pages": 2}
+        )
+        pending_refinement["mirror_cover"].update(
+            {
+                "covers_pending": 1,
+                "covers_covered": 0,
+                "evidence": {},
+            }
+        )
+        cases.append(("terminal pending", terminal_pending, "still has pending covers"))
+
+        terminal_blocked = deepcopy(valid)
+        blocked_refinement = terminal_blocked["single_day_refinement"]
+        blocked_refinement["mirror_pages"] = 12
+        blocked_refinement["mirror_cover"].update(
+            {
+                "covers_covered": 0,
+                "covers_blocked": 1,
+                "evidence": {
+                    "area-node-1": self._terminal_mirror_evidence(
+                        state="blocked",
+                        generation=3,
+                    )
+                },
+            }
+        )
+        cases.append(("terminal blocked", terminal_blocked, "still has blocked covers"))
+
+        terminal_failed = deepcopy(valid)
+        failed_refinement = terminal_failed["single_day_refinement"]
+        failed_refinement["mirror_pages"] = 0
+        failed_refinement["mirror_cover"].update(
+            {
+                "covers_covered": 0,
+                "covers_failed": 1,
+                "evidence": {
+                    "area-node-1": self._failed_mirror_evidence()
+                },
+            }
+        )
+        cases.append(("terminal failed", terminal_failed, "still has failed covers"))
+
+        for name, progress, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(
+                AssertionError, message
+            ):
+                assert_active_interval_coverage_contract(progress)
+
+    def test_mirror_cover_terminal_evidence_tampering_fails_closed(self) -> None:
+        valid = self._covered_mirror_progress(generation=3)
+        cases: list[tuple[str, dict, str]] = []
+
+        bad_query = deepcopy(valid)
+        bad_query["single_day_refinement"]["mirror_cover"]["evidence"][
+            "area-node-1"
+        ]["query_hash"] = "0" * 64
+        cases.append(("query", bad_query, "query mismatch"))
+
+        duplicate_generation_hash = deepcopy(valid)
+        generation_hashes = duplicate_generation_hash["single_day_refinement"][
+            "mirror_cover"
+        ]["evidence"]["area-node-1"]["generation_evidence_sha256"]
+        generation_hashes[1] = generation_hashes[0]
+        cases.append(
+            (
+                "duplicate generation hash",
+                duplicate_generation_hash,
+                "reuses a generation evidence hash",
+            )
+        )
+
+        missing_generation_hash = deepcopy(valid)
+        missing_generation_hash["single_day_refinement"]["mirror_cover"][
+            "evidence"
+        ]["area-node-1"]["generation_evidence_sha256"].pop()
+        cases.append(
+            (
+                "missing generation hash",
+                missing_generation_hash,
+                "generation evidence sequence mismatch",
+            )
+        )
+
+        oversized_final = deepcopy(valid)
+        oversized_final["single_day_refinement"]["mirror_cover"]["evidence"][
+            "area-node-1"
+        ]["final_total_count"] = 97
+        cases.append(("final count", oversized_final, "final count is invalid"))
+
+        bad_final_hash = deepcopy(valid)
+        bad_final_hash["single_day_refinement"]["mirror_cover"]["evidence"][
+            "area-node-1"
+        ]["final_union_sha256"] = "not-a-sha"
+        cases.append(("final hash", bad_final_hash, "final union SHA-256 is invalid"))
+
+        page_three = deepcopy(valid)
+        page_three_refinement = page_three["single_day_refinement"]
+        page_three_refinement["mirror_pages"] = 6
+        page_three_refinement["mirror_cover"].update(
+            {
+                "covers_covered": 0,
+                "covers_failed": 1,
+                "evidence": {
+                    "area-node-1": {
+                        "version": 1,
+                        "strategy": "single_day_bidirectional_submission_cover_v1",
+                        "query_hash": (
+                            "fb4de883da302089b8f30490a62431af6aea76ac3de86e3714105cee1d628d48"
+                        ),
+                        "state": "failed",
+                        "generation": 2,
+                        "failed_direction": "ASC",
+                        "failure_count": 2,
+                        "failure_reason": (
+                            "mirror_cover_capture_attempts_exhausted:fixture"
+                        ),
+                        "generation_evidence_sha256": ["a" * 64],
+                        "partial_pages": [
+                            {
+                                "capture_kind": "mirror_desc",
+                                "page_number": page_number,
+                                "sha256": chr(97 + page_number) * 64,
+                                "capture_epoch_id": "fixture-epoch",
+                                "accepted_at": "2026-07-19T02:00:00+00:00",
+                            }
+                            for page_number in (1, 3)
+                        ],
+                    }
+                },
+            }
+        )
+        cases.append(("page three", page_three, "partial page exceeds page 2"))
+
+        for name, progress, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(
+                AssertionError, message
+            ):
+                assert_active_interval_coverage_contract(progress)
 
     def test_refinement_is_optional_until_a_refined_interval_exists(self) -> None:
         initial = interval_coverage_progress((), raw_replay_valid=False)

@@ -50,6 +50,18 @@ SINGLE_DAY_REFINEMENT_VERSION = 1
 SINGLE_DAY_REFINEMENT_STRATEGY = "single_day_type_area_cover_v1"
 TEMPORAL_RECONCILIATION_VERSION = 2
 TEMPORAL_RECONCILIATION_GENERATIONS = {2, 3}
+SINGLE_DAY_MIRROR_COVER_VERSION = 1
+SINGLE_DAY_MIRROR_COVER_STRATEGY = (
+    "single_day_bidirectional_submission_cover_v1"
+)
+SINGLE_DAY_MIRROR_COVER_QUERY_SHA256 = (
+    "fb4de883da302089b8f30490a62431af6aea76ac3de86e3714105cee1d628d48"
+)
+SINGLE_DAY_MIRROR_COVER_GENERATIONS = {2, 3}
+SINGLE_DAY_MIRROR_COVER_MAX_GENERATION = 3
+SINGLE_DAY_MIRROR_COVER_MIN_TOTAL = 49
+SINGLE_DAY_MIRROR_COVER_MAX_TOTAL = 96
+SINGLE_DAY_MIRROR_COVER_MAX_PAGES_PER_NODE = 12
 SINGLE_DAY_REFINEMENT_QUERY_SHA256 = (
     "d078ee4040ba11bcea31164ee9cef853db2e39e77563e92a81ffbb27b1498eb8"
 )
@@ -2004,6 +2016,273 @@ def assert_active_cardinality_progress_summary(progress: object) -> None:
     )
 
 
+def _assert_single_day_mirror_cover_contract(
+    refinement: dict,
+    *,
+    coverage_complete: bool,
+    cycle_terminal: bool,
+) -> None:
+    """Validate the additive, bounded two-ended cover for dense area leaves."""
+
+    extension_keys = ("nodes_mirror_pending", "mirror_pages", "mirror_cover")
+    extension_presence = [key in refinement for key in extension_keys]
+    if not any(extension_presence):
+        # The contract must land before the first mirror-aware producer snapshot.
+        # Legacy partial progress may omit the whole additive extension, but a
+        # terminal snapshot may not use that compatibility path.
+        assert not coverage_complete and not cycle_terminal, (
+            "schema-5 terminal refinement is missing mirror-cover status"
+        )
+        return
+    assert all(extension_presence), (
+        "schema-5 mirror-cover extension is only partially published"
+    )
+
+    nodes_mirror_pending = refinement.get("nodes_mirror_pending")
+    mirror_pages = refinement.get("mirror_pages")
+    assert _nonnegative_integer(nodes_mirror_pending), (
+        "schema-5 mirror-cover pending-node count is invalid"
+    )
+    assert _nonnegative_integer(mirror_pages), (
+        "schema-5 mirror-cover page count is invalid"
+    )
+    assert isinstance(mirror_pages, int) and not isinstance(mirror_pages, bool)
+    mirror_pages_count = mirror_pages
+
+    mirror = refinement.get("mirror_cover")
+    assert isinstance(mirror, dict), "schema-5 mirror-cover status is invalid"
+    version = mirror.get("version")
+    assert (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == SINGLE_DAY_MIRROR_COVER_VERSION
+    ), "schema-5 mirror-cover version mismatch"
+    assert mirror.get("strategy") == SINGLE_DAY_MIRROR_COVER_STRATEGY, (
+        "schema-5 mirror-cover strategy mismatch"
+    )
+    query_hash = _sha256(
+        mirror.get("query_hash"),
+        label="schema-5 mirror-cover query",
+    )
+    assert query_hash == SINGLE_DAY_MIRROR_COVER_QUERY_SHA256, (
+        "schema-5 mirror-cover query contract mismatch"
+    )
+
+    count_keys = (
+        "covers_total",
+        "migrations_total",
+        "covers_pending",
+        "covers_covered",
+        "covers_blocked",
+        "covers_failed",
+    )
+    for key in count_keys:
+        assert _nonnegative_integer(mirror.get(key)), (
+            f"schema-5 mirror-cover {key} is invalid"
+        )
+    assert mirror["covers_total"] == (
+        mirror["covers_pending"]
+        + mirror["covers_covered"]
+        + mirror["covers_blocked"]
+        + mirror["covers_failed"]
+    ), "schema-5 mirror-cover state arithmetic mismatch"
+    assert mirror["migrations_total"] <= mirror["covers_total"], (
+        "schema-5 mirror-cover migration count exceeds covers"
+    )
+    assert nodes_mirror_pending == mirror["covers_pending"], (
+        "schema-5 mirror-cover pending-node arithmetic mismatch"
+    )
+    assert mirror_pages_count <= (
+        SINGLE_DAY_MIRROR_COVER_MAX_PAGES_PER_NODE * mirror["covers_total"]
+    ), "schema-5 mirror-cover page count exceeds bounded generations"
+    assert mirror_pages_count % 2 == 0, (
+        "schema-5 mirror-cover page arithmetic is not pair-aligned"
+    )
+
+    evidence = mirror.get("evidence")
+    assert isinstance(evidence, dict), "schema-5 mirror-cover evidence is invalid"
+    terminal_count = (
+        mirror["covers_covered"]
+        + mirror["covers_blocked"]
+        + mirror["covers_failed"]
+    )
+    assert len(evidence) == terminal_count, (
+        "schema-5 mirror-cover terminal evidence count mismatch"
+    )
+    evidence_state_counts = {state: 0 for state in ("covered", "blocked", "failed")}
+    terminal_pages = 0
+    for node_id, item in evidence.items():
+        label = f"schema-5 mirror-cover evidence {node_id}"
+        assert isinstance(node_id, str) and node_id.strip(), (
+            "schema-5 mirror-cover evidence node id is invalid"
+        )
+        assert isinstance(item, dict), f"{label} is invalid"
+        evidence_version = item.get("version")
+        assert (
+            isinstance(evidence_version, int)
+            and not isinstance(evidence_version, bool)
+            and evidence_version == SINGLE_DAY_MIRROR_COVER_VERSION
+        ), (
+            f"{label} version mismatch"
+        )
+        assert item.get("strategy") == SINGLE_DAY_MIRROR_COVER_STRATEGY, (
+            f"{label} strategy mismatch"
+        )
+        evidence_query_hash = _sha256(
+            item.get("query_hash"),
+            label=f"{label} query",
+        )
+        assert evidence_query_hash == query_hash, f"{label} query mismatch"
+        state = item.get("state")
+        assert state in evidence_state_counts, f"{label} state is invalid"
+        evidence_state_counts[str(state)] += 1
+
+        generation = item.get("generation")
+        assert (
+            isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and 1 <= generation <= SINGLE_DAY_MIRROR_COVER_MAX_GENERATION
+        ), f"{label} generation is invalid"
+        generation_hashes = item.get("generation_evidence_sha256")
+        assert isinstance(generation_hashes, list), (
+            f"{label} generation evidence hashes are invalid"
+        )
+        for evidence_hash in generation_hashes:
+            _sha256(evidence_hash, label=f"{label} generation evidence")
+        assert len(generation_hashes) == len(set(generation_hashes)), (
+            f"{label} reuses a generation evidence hash"
+        )
+
+        if state in {"covered", "blocked"}:
+            assert generation in SINGLE_DAY_MIRROR_COVER_GENERATIONS, (
+                f"{label} terminal generation is invalid"
+            )
+            if state == "blocked":
+                assert generation == SINGLE_DAY_MIRROR_COVER_MAX_GENERATION, (
+                    f"{label} blocked before the maximum generation"
+                )
+            baseline_generation = item.get("baseline_generation")
+            assert (
+                isinstance(baseline_generation, int)
+                and not isinstance(baseline_generation, bool)
+                and baseline_generation == generation - 1
+            ), (
+                f"{label} baseline generation mismatch"
+            )
+            assert len(generation_hashes) == generation, (
+                f"{label} generation evidence sequence mismatch"
+            )
+            final_total = item.get("final_total_count")
+            assert (
+                isinstance(final_total, int)
+                and not isinstance(final_total, bool)
+                and SINGLE_DAY_MIRROR_COVER_MIN_TOTAL
+                <= final_total
+                <= SINGLE_DAY_MIRROR_COVER_MAX_TOTAL
+            ), f"{label} final count is invalid"
+            _sha256(item.get("final_union_sha256"), label=f"{label} final union")
+            _sha256(
+                item.get("final_bijection_sha256"),
+                label=f"{label} final bijection",
+            )
+            terminal_pages += 4 * generation
+            continue
+
+        assert len(generation_hashes) == generation - 1, (
+            f"{label} failed-generation evidence sequence mismatch"
+        )
+        assert item.get("final_total_count") is None, (
+            f"{label} failed cover claims a final count"
+        )
+        assert item.get("final_union_sha256") is None, (
+            f"{label} failed cover claims a final union"
+        )
+        assert item.get("final_bijection_sha256") is None, (
+            f"{label} failed cover claims a final bijection"
+        )
+        failed_direction = item.get("failed_direction")
+        assert failed_direction in {"DESC", "ASC"}, (
+            f"{label} failed direction is invalid"
+        )
+        failure_count = item.get("failure_count")
+        assert (
+            isinstance(failure_count, int)
+            and not isinstance(failure_count, bool)
+            and failure_count >= 2
+        ), f"{label} failure count is invalid"
+        failure_reason = item.get("failure_reason")
+        assert (
+            isinstance(failure_reason, str)
+            and failure_reason.startswith("mirror_cover_capture_attempts_exhausted:")
+        ), f"{label} failure reason is invalid"
+        partial_pages = item.get("partial_pages")
+        assert isinstance(partial_pages, list), f"{label} partial pages are invalid"
+        expected_partial_pages = (
+            [] if failed_direction == "DESC" else [("mirror_desc", 1), ("mirror_desc", 2)]
+        )
+        actual_partial_pages: list[tuple[str, int]] = []
+        partial_epochs: set[str] = set()
+        for page in partial_pages:
+            assert isinstance(page, dict), f"{label} partial page is invalid"
+            capture_kind = page.get("capture_kind")
+            page_number = page.get("page_number")
+            assert isinstance(capture_kind, str) and _nonnegative_integer(page_number), (
+                f"{label} partial page identity is invalid"
+            )
+            assert isinstance(page_number, int) and not isinstance(page_number, bool)
+            page_number_int = page_number
+            assert 1 <= page_number_int <= 2, (
+                f"{label} partial page exceeds page 2"
+            )
+            actual_partial_pages.append((capture_kind, page_number_int))
+            _sha256(page.get("sha256"), label=f"{label} partial page")
+            epoch = page.get("capture_epoch_id")
+            assert isinstance(epoch, str) and epoch.strip(), (
+                f"{label} partial page epoch is invalid"
+            )
+            partial_epochs.add(epoch)
+            assert parse_iso_datetime(page.get("accepted_at")) is not None, (
+                f"{label} partial page timestamp is invalid"
+            )
+        assert actual_partial_pages == expected_partial_pages, (
+            f"{label} partial page sequence mismatch"
+        )
+        assert len(partial_epochs) <= 1, f"{label} partial page epoch mismatch"
+        terminal_pages += 4 * len(generation_hashes) + len(partial_pages)
+
+    assert evidence_state_counts["covered"] == mirror["covers_covered"], (
+        "schema-5 mirror-cover covered evidence arithmetic mismatch"
+    )
+    assert evidence_state_counts["blocked"] == mirror["covers_blocked"], (
+        "schema-5 mirror-cover blocked evidence arithmetic mismatch"
+    )
+    assert evidence_state_counts["failed"] == mirror["covers_failed"], (
+        "schema-5 mirror-cover failed evidence arithmetic mismatch"
+    )
+    if mirror["covers_pending"]:
+        assert mirror_pages_count >= terminal_pages, (
+            "schema-5 mirror-cover page count omits terminal evidence"
+        )
+    else:
+        assert mirror_pages_count == terminal_pages, (
+            "schema-5 mirror-cover page arithmetic mismatch"
+        )
+
+    if coverage_complete or cycle_terminal:
+        assert mirror["covers_pending"] == 0, (
+            "schema-5 terminal mirror-cover still has pending covers"
+        )
+        assert mirror["covers_blocked"] == 0, (
+            "schema-5 terminal mirror-cover still has blocked covers"
+        )
+        assert mirror["covers_failed"] == 0, (
+            "schema-5 terminal mirror-cover still has failed covers"
+        )
+        assert mirror["covers_covered"] == mirror["covers_total"], (
+            "schema-5 terminal mirror-cover has uncovered covers"
+        )
+
+
 def _assert_single_day_refinement_contract(
     refinement: object,
     *,
@@ -2091,6 +2370,10 @@ def _assert_single_day_refinement_contract(
         entry["raw_replay_valid"] for entry in entries
     ), "schema-5 single-day refinement taxonomy RAW replay arithmetic mismatch"
 
+    mirror_extension_present = any(
+        key in refinement
+        for key in ("nodes_mirror_pending", "mirror_pages", "mirror_cover")
+    )
     count_keys = (
         "cells_total",
         "cells_refining",
@@ -2110,6 +2393,10 @@ def _assert_single_day_refinement_contract(
         "identity_conflict_count",
         "duplicate_observations",
         "overlap_count",
+    ) + (
+        ("nodes_mirror_pending", "mirror_pages")
+        if mirror_extension_present
+        else ()
     )
     for key in count_keys:
         assert _nonnegative_integer(refinement.get(key)), (
@@ -2127,6 +2414,11 @@ def _assert_single_day_refinement_contract(
     assert refinement["nodes_total"] == (
         refinement["nodes_pending"]
         + refinement["nodes_pending_page2"]
+        + (
+            refinement["nodes_mirror_pending"]
+            if mirror_extension_present
+            else 0
+        )
         + refinement["nodes_exact"]
         + refinement["nodes_blocked"]
     ), "schema-5 single-day refinement node arithmetic mismatch"
@@ -2144,14 +2436,21 @@ def _assert_single_day_refinement_contract(
     assert max_page_requested <= 2, (
         "schema-5 single-day refinement exceeds the page-2 ceiling"
     )
-    pages_requested = refinement["accepted_pages"] + refinement["probe_pages"]
+    pages_requested = (
+        refinement["accepted_pages"]
+        + refinement["probe_pages"]
+        + (refinement["mirror_pages"] if mirror_extension_present else 0)
+    )
     assert (max_page_requested == 0) == (pages_requested == 0), (
         "schema-5 single-day refinement page metrics are inconsistent"
     )
     assert pages_requested >= refinement["nodes_exact"], (
         "schema-5 single-day refinement has fewer page proofs than exact nodes"
     )
-    assert pages_requested <= 4 * refinement["nodes_total"], (
+    assert (
+        refinement["accepted_pages"] + refinement["probe_pages"]
+        <= 4 * refinement["nodes_total"]
+    ), (
         "schema-5 single-day refinement page metrics exceed bounded retries"
     )
 
@@ -2191,6 +2490,12 @@ def _assert_single_day_refinement_contract(
         assert refinement["raw_replay_valid"] is False, (
             "schema-5 single-day refinement ignores RAW replay errors"
         )
+
+    _assert_single_day_mirror_cover_contract(
+        refinement,
+        coverage_complete=coverage_complete,
+        cycle_terminal=cycle_terminal,
+    )
 
     reconciliation = refinement.get("temporal_reconciliation")
     assert isinstance(reconciliation, dict), (
@@ -2477,6 +2782,10 @@ def _assert_single_day_refinement_contract(
         assert refinement["nodes_pending_page2"] == 0, (
             "schema-5 terminal refinement still has pending page-2 nodes"
         )
+        if mirror_extension_present:
+            assert refinement["nodes_mirror_pending"] == 0, (
+                "schema-5 terminal refinement still has mirror-pending nodes"
+            )
         assert refinement["nodes_blocked"] == 0, (
             "schema-5 terminal refinement still has blocked nodes"
         )
