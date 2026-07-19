@@ -351,6 +351,7 @@ def assert_active_date_scan_contract(progress: object) -> None:
     )
 
     for key in (
+        "root_domain_fixed",
         "domain_matches_unfiltered_boundary",
         "partition_authoritative",
         "absence_authoritative",
@@ -362,6 +363,9 @@ def assert_active_date_scan_contract(progress: object) -> None:
             f"active date scan {key} is invalid"
         )
     if progress["partition_authoritative"]:
+        assert progress["root_domain_fixed"], (
+            "authoritative active date partition does not cover the fixed domain"
+        )
         assert progress["domain_matches_unfiltered_boundary"], (
             "active date partition lacks an unfiltered boundary proof"
         )

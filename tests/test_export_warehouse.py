@@ -648,6 +648,7 @@ class ExportContractTests(unittest.TestCase):
             "convergence_passes": 1,
             "generation": 1,
             "convergence_last_generation": 1,
+            "root_domain_fixed": True,
             "domain_matches_unfiltered_boundary": True,
             "partition_authoritative": False,
             "absence_authoritative": False,
@@ -784,6 +785,7 @@ class ExportContractTests(unittest.TestCase):
             "convergence_passes": 2,
             "generation": 2,
             "convergence_last_generation": 2,
+            "root_domain_fixed": True,
             "domain_matches_unfiltered_boundary": True,
             "partition_authoritative": True,
             "absence_authoritative": False,
@@ -800,6 +802,10 @@ class ExportContractTests(unittest.TestCase):
         pending = {**progress, "ranges_pending": 1}
         with self.assertRaisesRegex(AssertionError, "pending ranges"):
             assert_active_date_scan_contract(pending)
+
+        narrow_domain = {**progress, "root_domain_fixed": False}
+        with self.assertRaisesRegex(AssertionError, "fixed domain"):
+            assert_active_date_scan_contract(narrow_domain)
 
         same_generation = {
             **progress,
