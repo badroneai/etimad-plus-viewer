@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from check_data_contract import check_remote  # noqa: E402
 from export_warehouse import (  # noqa: E402
@@ -23,6 +24,10 @@ from export_warehouse import (  # noqa: E402
     awarded_index_part_config,
     index_part_for_ref,
     shard_for_ref,
+)
+from schema5_fixtures import (  # noqa: E402
+    interval_coverage_progress,
+    outer_active_scan,
 )
 
 
@@ -170,6 +175,55 @@ class RemoteContractTests(unittest.TestCase):
                     SHARD_COUNT + AWARDED_INDEX_PART_COUNT + 2,
                 )
                 self.assertEqual(summary["awarded"], 1)
+
+                schema5_status = {
+                    "active_scan": outer_active_scan(
+                        interval_coverage_progress()
+                    ),
+                    "still_missing": {},
+                }
+                write_asset("fetch_status.json", schema5_status)
+                manifest["still_missing"] = {}
+                (data / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+                schema5_summary = check_remote(
+                    base_url, "remote-test", wait_seconds=0
+                )
+                self.assertEqual(schema5_summary["awarded"], 1)
+
+                write_asset(
+                    "active_scan_authority.json",
+                    {"schema_version": 5, "forged": True},
+                )
+                (data / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "remote snapshot did not converge"
+                ):
+                    check_remote(base_url, "remote-test", wait_seconds=0)
+                (data / "active_scan_authority.json").unlink()
+                assets.pop("active_scan_authority.json")
+
+                write_asset(
+                    "fetch_status.json",
+                    {
+                        "active_scan": {
+                            "available": False,
+                            "reason": "official_database_metadata_absent",
+                        },
+                        "still_missing": {
+                            "active_refresh_sweep": {"complete": False}
+                        },
+                    },
+                )
+                manifest["still_missing"] = {
+                    "active_refresh_sweep": {"complete": False}
+                }
+                (data / "manifest.json").write_text(
+                    json.dumps(manifest), encoding="utf-8"
+                )
 
                 index_part = data / f"awarded_index_parts/{target_part:02d}.json"
                 original_part = index_part.read_bytes()

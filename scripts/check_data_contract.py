@@ -21,9 +21,13 @@ from export_warehouse import (
     CARDINALITY_SEAL_MODE,
     CARDINALITY_SEAL_SCHEMA_VERSION,
     CARDINALITY_SEAL_STRATEGY,
+    INTERVAL_COVERAGE_MODE,
+    INTERVAL_COVERAGE_SCHEMA_VERSION,
+    INTERVAL_COVERAGE_STRATEGY,
     OFFICIAL_REGION_LABELS,
     SCHEMA_VERSION,
     SHARD_COUNT,
+    active_refresh_sweep_complete,
     awarded_index_part_config,
     index_part_for_ref,
     parse_iso_datetime,
@@ -40,6 +44,8 @@ OFFICIAL_COMPONENT_SOURCE_ID = "etimad_official_components"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 ACTIVE_DATE_DOMAIN_START = "1900-01-01"
 ACTIVE_DATE_DOMAIN_END = "2100-12-31"
+ACTIVE_INTERVAL_DOMAIN_START = "1900-01-01"
+ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE = "2101-01-01"
 ACTIVE_LIST_ENDPOINT = (
     "https://tenders.etimad.sa/Tender/AllSupplierTendersForVisitorAsync"
 )
@@ -267,6 +273,16 @@ def assert_active_scan_progress_contract(
             assert targets.get("observed") == scanned
             assert targets.get("resolved") == resolved
             assert targets.get("absent") == absent
+        elif date_fallback.get("schema_version") == INTERVAL_COVERAGE_SCHEMA_VERSION:
+            targets = date_fallback.get("targets")
+            assert isinstance(targets, dict), "active scan target status is missing"
+            assert targets.get("total") == denominator
+            assert targets.get("absent") == 0
+            assert targets.get("observed") == targets.get("resolved")
+            assert _nonnegative_integer(targets.get("observed"))
+            assert targets["observed"] <= scanned, (
+                "schema-5 cycle observations exceed outer historical scan balance"
+            )
         else:
             assert date_fallback["target_count"] == denominator, (
                 "active date scan target cohort differs from active_scan"
@@ -292,30 +308,44 @@ def assert_active_scan_progress_contract(
             assert progress.get("bootstrap_complete") == date_fallback[
                 "bootstrap"
             ].get("complete"), "active bootstrap completion aliases disagree"
-    awaiting_date_authority = bool(
+    date_scan_complete = bool(
         isinstance(date_fallback, dict)
-        and not date_fallback.get("completion_authoritative", False)
+        and (
+            active_refresh_sweep_complete(date_fallback)
+            if date_fallback.get("schema_version")
+            == INTERVAL_COVERAGE_SCHEMA_VERSION
+            else date_fallback.get("completion_authoritative", False)
+        )
+    )
+    awaiting_date_completion = bool(
+        isinstance(date_fallback, dict)
+        and not date_scan_complete
     )
     if progress["complete"]:
-        assert not awaiting_date_authority, (
-            "active_scan completed before date partition authority"
-        )
-    if denominator and remaining == 0 and not awaiting_date_authority:
+        if (
+            isinstance(date_fallback, dict)
+            and date_fallback.get("schema_version")
+            == INTERVAL_COVERAGE_SCHEMA_VERSION
+        ):
+            assert not awaiting_date_completion, (
+                "active_scan completed before its active traversal"
+            )
+        else:
+            assert not awaiting_date_completion, (
+                "active_scan completed before date partition authority"
+            )
+    if denominator and remaining == 0 and not awaiting_date_completion:
         assert progress["complete"], "active_scan reached full coverage without completion"
 
 
 def assert_active_missing_truth(progress: object, still_missing: object) -> None:
-    """Only a schema-4 cardinality seal may clear the active-refresh gap."""
+    """Clear the process gap without confusing interval coverage with authority."""
 
     assert isinstance(still_missing, dict), "still_missing is invalid"
     date_fallback = progress.get("date_fallback") if isinstance(progress, dict) else None
-    selected_authority = selected_cardinality_authority(date_fallback)
-    sealed = bool(
-        selected_authority is not None
-        and selected_authority.get("completion_authoritative") is True
-    )
-    assert ("active_refresh_sweep" not in still_missing) == sealed, (
-        "active_refresh_sweep still_missing disagrees with schema-4 authority"
+    completed = active_refresh_sweep_complete(date_fallback)
+    assert ("active_refresh_sweep" not in still_missing) == completed, (
+        "active_refresh_sweep still_missing disagrees with verified scan completion"
     )
 
 
@@ -1944,6 +1974,313 @@ def assert_active_cardinality_progress_summary(progress: object) -> None:
     )
 
 
+def assert_active_interval_coverage_contract(
+    progress: object,
+    evidence: object = None,
+) -> None:
+    """Validate finite progressive interval coverage without snapshot authority."""
+
+    assert isinstance(progress, dict), "schema-5 interval coverage is missing"
+    assert progress.get("schema_version") == INTERVAL_COVERAGE_SCHEMA_VERSION
+    assert progress.get("strategy") == INTERVAL_COVERAGE_STRATEGY, (
+        "schema-5 interval coverage strategy mismatch"
+    )
+    assert progress.get("mode") == INTERVAL_COVERAGE_MODE, (
+        "schema-5 interval coverage mode mismatch"
+    )
+    assert evidence is None, "schema-5 interval coverage cannot publish authority evidence"
+    assert "evidence_asset" not in progress, (
+        "schema-5 interval coverage cannot own an authority evidence asset"
+    )
+    assert isinstance(progress.get("cycle_id"), str) and progress["cycle_id"], (
+        "schema-5 interval coverage cycle_id is missing"
+    )
+    assert progress.get("phase") in {
+        "sweeping",
+        "complete",
+        "complete_with_gaps",
+    }, "schema-5 interval coverage phase is invalid"
+    assert isinstance(progress.get("cycle_terminal"), bool), (
+        "schema-5 interval terminal flag is invalid"
+    )
+    assert progress.get("complete") is False, (
+        "schema-5 top-level complete must remain false"
+    )
+
+    for key in (
+        "instantaneous_snapshot_authoritative",
+        "snapshot_authoritative",
+        "union_authoritative",
+        "partition_authoritative",
+        "absence_authoritative",
+        "completion_authoritative",
+    ):
+        assert progress.get(key) is False, (
+            f"schema-5 interval coverage cannot claim {key}"
+        )
+
+    domain = progress.get("coverage_domain")
+    assert isinstance(domain, dict), "schema-5 coverage domain is missing"
+    assert domain.get("field") == "lastOfferPresentationDate", (
+        "schema-5 coverage field mismatch"
+    )
+    assert domain.get("from_day") == ACTIVE_INTERVAL_DOMAIN_START, (
+        "schema-5 coverage domain start mismatch"
+    )
+    assert domain.get("to_day_exclusive") == ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE, (
+        "schema-5 coverage domain end mismatch"
+    )
+    assert domain.get("timezone") == "Asia/Riyadh", (
+        "schema-5 coverage timezone mismatch"
+    )
+    domain_start = date.fromisoformat(ACTIVE_INTERVAL_DOMAIN_START)
+    domain_end = date.fromisoformat(ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE)
+    units_total = (domain_end - domain_start).days
+    assert domain.get("units_total") == units_total, (
+        "schema-5 coverage domain unit count mismatch"
+    )
+    _sha256(domain.get("query_hash"), label="schema-5 coverage query")
+
+    coverage = progress.get("coverage")
+    assert isinstance(coverage, dict), "schema-5 coverage summary is missing"
+    intervals = coverage.get("intervals")
+    assert isinstance(intervals, list), "schema-5 coverage intervals are invalid"
+    seen_interval_ids: set[str] = set()
+    previous_end: date | None = None
+    derived_units = {"covered": 0, "terminal_gap": 0}
+    derived_leaves = {"covered": 0, "terminal_gap": 0}
+    for index, interval in enumerate(intervals):
+        label = f"schema-5 coverage interval {index}"
+        assert isinstance(interval, dict), f"{label} is invalid"
+        interval_id = interval.get("interval_id")
+        assert isinstance(interval_id, str) and interval_id, (
+            f"{label} id is missing"
+        )
+        assert interval_id not in seen_interval_ids, (
+            "schema-5 coverage interval id is duplicated"
+        )
+        seen_interval_ids.add(interval_id)
+        try:
+            from_day = date.fromisoformat(str(interval.get("from_day") or ""))
+            to_day = date.fromisoformat(
+                str(interval.get("to_day_exclusive") or "")
+            )
+        except ValueError as exc:
+            raise AssertionError(f"{label} date is invalid") from exc
+        assert to_day > from_day, f"{label} is empty or reversed"
+        assert from_day >= domain_start, f"{label} escapes the coverage domain"
+        assert to_day <= domain_end, f"{label} escapes the coverage domain"
+        if previous_end is not None:
+            assert from_day >= previous_end, (
+                "schema-5 coverage intervals overlap or are out of order"
+            )
+        state = interval.get("state")
+        assert state in derived_units, f"{label} state is invalid"
+        units = (to_day - from_day).days
+        assert _nonnegative_integer(interval.get("units")), (
+            f"{label} unit count is invalid"
+        )
+        assert interval["units"] == units, f"{label} unit count mismatch"
+        total_count = interval.get("total_count")
+        assert total_count is None or _nonnegative_integer(total_count), (
+            f"{label} total_count is invalid"
+        )
+        attempt_no = interval.get("attempt_no")
+        assert (
+            isinstance(attempt_no, int)
+            and not isinstance(attempt_no, bool)
+            and attempt_no > 0
+        ), (
+            f"{label} attempt_no is invalid"
+        )
+        first_observed_at = parse_iso_datetime(interval.get("first_observed_at"))
+        last_observed_at = parse_iso_datetime(interval.get("last_observed_at"))
+        assert first_observed_at is not None, (
+            f"{label} first_observed_at is invalid"
+        )
+        assert last_observed_at is not None, (
+            f"{label} last_observed_at is invalid"
+        )
+        assert first_observed_at <= last_observed_at, (
+            f"{label} observation window is reversed"
+        )
+        terminal_reason = interval.get("terminal_reason")
+        assert terminal_reason is None or (
+            isinstance(terminal_reason, str) and terminal_reason.strip()
+        ), f"{label} terminal_reason is invalid"
+        if state == "terminal_gap":
+            assert isinstance(terminal_reason, str) and terminal_reason.strip(), (
+                f"{label} terminal gap reason is missing"
+            )
+        derived_units[str(state)] += units
+        derived_leaves[str(state)] += 1
+        previous_end = to_day
+
+    terminal_units = sum(derived_units.values())
+    assert terminal_units <= units_total, (
+        "schema-5 terminal interval geometry exceeds the coverage domain"
+    )
+    derived_pending = units_total - terminal_units
+
+    for key in (
+        "units_covered",
+        "units_gap",
+        "units_pending",
+        "leaves_covered",
+        "leaves_gap",
+    ):
+        assert _nonnegative_integer(coverage.get(key)), (
+            f"schema-5 coverage {key} is invalid"
+        )
+    assert coverage["units_covered"] == derived_units["covered"], (
+        "schema-5 covered-unit arithmetic mismatch"
+    )
+    assert coverage["units_gap"] == derived_units["terminal_gap"], (
+        "schema-5 gap-unit arithmetic mismatch"
+    )
+    assert coverage["units_pending"] == derived_pending, (
+        "schema-5 pending-unit arithmetic mismatch"
+    )
+    assert coverage["leaves_covered"] == derived_leaves["covered"]
+    assert coverage["leaves_gap"] == derived_leaves["terminal_gap"]
+    assert _nonnegative_integer(coverage.get("leaves_pending")), (
+        "schema-5 pending-leaf count is invalid"
+    )
+    assert (coverage["leaves_pending"] == 0) == (derived_pending == 0), (
+        "schema-5 pending-leaf state disagrees with unvisited geometry"
+    )
+    _assert_percentage(
+        coverage.get("coverage_percent"),
+        100.0 * derived_units["covered"] / units_total,
+        label="schema-5 interval coverage_percent",
+    )
+    _assert_percentage(
+        coverage.get("traversal_percent"),
+        100.0
+        * (derived_units["covered"] + derived_units["terminal_gap"])
+        / units_total,
+        label="schema-5 interval traversal_percent",
+    )
+    assert _nonnegative_integer(coverage.get("geometry_error_count")), (
+        "schema-5 interval geometry error count is invalid"
+    )
+    assert coverage["geometry_error_count"] == 0, (
+        "schema-5 interval geometry reports unresolved errors"
+    )
+    expected_geometry_complete = bool(
+        intervals
+        and terminal_units == units_total
+        and intervals[0]["from_day"] == ACTIVE_INTERVAL_DOMAIN_START
+        and intervals[-1]["to_day_exclusive"]
+        == ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE
+    )
+    assert coverage.get("geometry_complete") is expected_geometry_complete, (
+        "schema-5 interval geometry completion arithmetic mismatch"
+    )
+    assert _nonnegative_integer(coverage.get("identity_conflict_count")), (
+        "schema-5 interval identity conflict count is invalid"
+    )
+    assert isinstance(coverage.get("raw_replay_valid"), bool), (
+        "schema-5 interval RAW replay flag is invalid"
+    )
+    assert isinstance(coverage.get("complete"), bool), (
+        "schema-5 coverage completion flag is invalid"
+    )
+
+    terminal = derived_pending == 0
+    expected_complete = bool(
+        terminal
+        and derived_units["terminal_gap"] == 0
+        and coverage["identity_conflict_count"] == 0
+        and coverage["raw_replay_valid"] is True
+    )
+    assert progress["cycle_terminal"] == terminal, (
+        "schema-5 interval terminal arithmetic mismatch"
+    )
+    assert coverage["complete"] == expected_complete, (
+        "schema-5 interval completion arithmetic mismatch"
+    )
+    expected_phase = (
+        "complete"
+        if expected_complete
+        else "complete_with_gaps"
+        if terminal
+        else "sweeping"
+    )
+    assert progress["phase"] == expected_phase, (
+        "schema-5 interval phase arithmetic mismatch"
+    )
+
+    observations = progress.get("observations")
+    assert isinstance(observations, dict), (
+        "schema-5 interval observation summary is missing"
+    )
+    for key in (
+        "unique_references",
+        "observation_records",
+        "duplicate_observations",
+    ):
+        assert _nonnegative_integer(observations.get(key)), (
+            f"schema-5 interval observation {key} is invalid"
+        )
+    assert observations["observation_records"] >= observations["unique_references"]
+    assert observations["duplicate_observations"] == (
+        observations["observation_records"] - observations["unique_references"]
+    ), "schema-5 interval duplicate observation arithmetic mismatch"
+    _sha256(observations.get("union_sha256"), label="schema-5 observed set")
+    assert observations.get("semantics") == (
+        "observed_at_least_once_during_cell_observation_intervals"
+    ), "schema-5 observation semantics are ambiguous"
+
+    window = progress.get("observation_window")
+    assert isinstance(window, dict), "schema-5 observation window is missing"
+    started_at = parse_iso_datetime(window.get("started_at"))
+    first_observed_at = parse_iso_datetime(window.get("first_observed_at"))
+    last_observed_at = parse_iso_datetime(window.get("last_observed_at"))
+    completed_at = parse_iso_datetime(window.get("completed_at"))
+    assert started_at is not None, "schema-5 observation start is invalid"
+    if first_observed_at is None or last_observed_at is None:
+        assert first_observed_at is None and last_observed_at is None
+        assert observations["observation_records"] == 0
+    else:
+        assert started_at <= first_observed_at <= last_observed_at
+    assert (completed_at is not None) == terminal, (
+        "schema-5 observation completion timestamp mismatch"
+    )
+    if completed_at is not None:
+        assert completed_at >= (last_observed_at or started_at)
+
+    targets = progress.get("targets")
+    assert isinstance(targets, dict), "schema-5 interval targets are missing"
+    for key in ("total", "observed", "absent", "resolved"):
+        assert _nonnegative_integer(targets.get(key)), (
+            f"schema-5 interval target {key} is invalid"
+        )
+    assert targets["absent"] == 0, (
+        "schema-5 interval traversal cannot claim target absence"
+    )
+    assert targets["resolved"] == targets["observed"] <= targets["total"]
+
+    last_authority = progress.get("last_authority")
+    if last_authority is not None:
+        assert isinstance(last_authority, dict), (
+            "schema-5 historical schema-4 authority is invalid"
+        )
+        assert "evidence_asset" not in last_authority, (
+            "schema-5 historical authority cannot publish an evidence asset"
+        )
+        assert "last_authority" not in last_authority, (
+            "schema-5 historical authority is recursively nested"
+        )
+        assert selected_cardinality_authority(last_authority) is last_authority, (
+            "schema-5 historical authority is not a schema-4 seal"
+        )
+        assert last_authority.get("cycle_id") != progress["cycle_id"], (
+            "schema-5 historical authority belongs to the current interval cycle"
+        )
+        assert_active_cardinality_progress_summary(last_authority)
+
+
 def assert_active_hybrid_scan_contract(
     progress: dict,
     evidence: object,
@@ -3051,7 +3388,9 @@ def assert_active_date_scan_contract(
 
     assert isinstance(progress, dict), "active date scan progress is invalid"
     schema_version = progress.get("schema_version", 2)
-    assert schema_version in (2, 3, 4), "active date scan schema version is unsupported"
+    assert schema_version in (2, 3, 4, 5), (
+        "active date scan schema version is unsupported"
+    )
     if schema_version == CARDINALITY_SEAL_SCHEMA_VERSION:
         assert_active_cardinality_progress_summary(progress)
         authority_progress = selected_cardinality_authority(progress)
@@ -3068,6 +3407,9 @@ def assert_active_date_scan_contract(
                     "last active census authority is recursively nested"
                 )
             assert_active_cardinality_scan_contract(authority_progress, evidence)
+        return
+    if schema_version == INTERVAL_COVERAGE_SCHEMA_VERSION:
+        assert_active_interval_coverage_contract(progress, evidence)
         return
     if schema_version == 3:
         assert_active_hybrid_scan_contract(progress, evidence)
