@@ -619,10 +619,16 @@
       winnerfacet_usable_payload: "حمولة winnerfacet صالحة",
       priority_save_non_gated_bodies: "حفظ أولوية غير مقيّد",
     };
-    const entries = Object.entries(missing).filter(([, v]) => v);
+    const entries = Object.entries(missing).filter(([, value]) => isStillMissing(value));
     el.missingList.innerHTML = entries.length
       ? entries.map(([k]) => `<li>${esc(labels[k] || k)}</li>`).join("")
       : `<li>لا يوجد نقص معلن في حالة الجلب الحالية.</li>`;
+  }
+
+  function isStillMissing(value) {
+    if (!value) return false;
+    if (typeof value === "object") return value.complete !== true;
+    return true;
   }
 
   function renderGroupTabs() {
@@ -1558,6 +1564,7 @@
     filterRows,
     loadAwardedDetail,
     loadDatasetPayload,
+    isStillMissing,
     parseRouteHash,
     prepareSearchRows,
     progressiveParts,
