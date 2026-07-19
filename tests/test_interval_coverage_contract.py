@@ -22,13 +22,289 @@ from export_warehouse import (  # noqa: E402
     selected_cardinality_authority,
 )
 from schema5_fixtures import (  # noqa: E402
+    attach_covered_single_day_refinement,
     interval_coverage_progress,
     outer_active_scan,
+    single_day_refinement_status,
 )
 from test_cardinality_seal_contract import cardinality_fixture  # noqa: E402
 
 
 class IntervalCoverageContractTests(unittest.TestCase):
+    def test_type_area_single_day_refinement_contract_is_replayable(self) -> None:
+        progress = attach_covered_single_day_refinement(
+            interval_coverage_progress()
+        )
+
+        assert_active_interval_coverage_contract(progress)
+        refinement = progress["single_day_refinement"]
+        self.assertEqual(refinement["strategy"], "single_day_type_area_cover_v1")
+        self.assertEqual(
+            [entry["kind"] for entry in refinement["taxonomy"]["entries"]],
+            ["type", "area"],
+        )
+        self.assertEqual(refinement["cells_covered"], refinement["seals_valid"])
+        self.assertEqual(refinement["max_page_requested"], 2)
+
+        future_compatible = deepcopy(progress)
+        future_compatible["single_day_refinement"]["future_metric"] = {
+            "accepted": True
+        }
+        assert_active_interval_coverage_contract(future_compatible)
+
+    def test_refinement_is_optional_until_a_refined_interval_exists(self) -> None:
+        initial = interval_coverage_progress((), raw_replay_valid=False)
+        partial = interval_coverage_progress(("covered",), raw_replay_valid=True)
+        historical_complete = interval_coverage_progress()
+        for progress in (initial, partial, historical_complete):
+            assert_active_interval_coverage_contract(progress)
+
+        refining = interval_coverage_progress(("covered",), raw_replay_valid=True)
+        refining["single_day_refinement"] = single_day_refinement_status(
+            state="refining"
+        )
+        assert_active_interval_coverage_contract(refining)
+
+        replay_pending = deepcopy(refining)
+        replay_pending["single_day_refinement"]["taxonomy"]["entries"][1][
+            "raw_replay_valid"
+        ] = False
+        replay_pending["single_day_refinement"]["taxonomy"][
+            "raw_replay_valid"
+        ] = False
+        replay_pending["single_day_refinement"]["raw_replay_valid"] = False
+        assert_active_interval_coverage_contract(replay_pending)
+
+        missing = attach_covered_single_day_refinement(
+            interval_coverage_progress()
+        )
+        del missing["single_day_refinement"]
+        with self.assertRaisesRegex(AssertionError, "missing single-day refinement"):
+            assert_active_interval_coverage_contract(missing)
+
+    def test_refinement_shape_and_replay_metrics_fail_closed(self) -> None:
+        valid = attach_covered_single_day_refinement(
+            interval_coverage_progress()
+        )
+        cases: list[tuple[str, dict, str]] = []
+
+        bad_version = deepcopy(valid)
+        bad_version["single_day_refinement"]["version"] = True
+        cases.append(("version", bad_version, "version mismatch"))
+
+        bad_strategy = deepcopy(valid)
+        bad_strategy["single_day_refinement"]["strategy"] = (
+            "single_day_type_partition_v1"
+        )
+        cases.append(("strategy", bad_strategy, "strategy mismatch"))
+
+        bad_query = deepcopy(valid)
+        bad_query["single_day_refinement"]["query_hash"] = "not-a-sha"
+        cases.append(("query", bad_query, "query SHA-256 is invalid"))
+
+        forged_query = deepcopy(valid)
+        forged_query["single_day_refinement"]["query_hash"] = "0" * 64
+        cases.append(
+            ("forged query", forged_query, "query contract mismatch")
+        )
+
+        missing_area = deepcopy(valid)
+        missing_area["single_day_refinement"]["taxonomy"]["entries"].pop()
+        cases.append(("taxonomy kinds", missing_area, "taxonomy kinds mismatch"))
+
+        bad_area_sha = deepcopy(valid)
+        bad_area_sha["single_day_refinement"]["taxonomy"]["entries"][1][
+            "sha256"
+        ] = "0" * 64
+        cases.append(("taxonomy SHA", bad_area_sha, "taxonomy SHA mismatch: area"))
+
+        for unsafe_path in ("../../etc/passwd", "/etc/passwd", "unrelated.bin"):
+            bad_path = deepcopy(valid)
+            bad_path["single_day_refinement"]["taxonomy"]["entries"][0][
+                "raw_path"
+            ] = unsafe_path
+            cases.append(
+                (
+                    f"taxonomy path {unsafe_path}",
+                    bad_path,
+                    "taxonomy RAW path is unsafe: type",
+                )
+            )
+
+        bad_taxonomy_replay = deepcopy(valid)
+        bad_taxonomy_replay["single_day_refinement"]["taxonomy"]["entries"][1][
+            "raw_replay_valid"
+        ] = False
+        cases.append(
+            (
+                "taxonomy replay",
+                bad_taxonomy_replay,
+                "taxonomy RAW replay arithmetic",
+            )
+        )
+
+        bad_cells = deepcopy(valid)
+        bad_cells["single_day_refinement"]["cells_total"] = 2
+        cases.append(("cells", bad_cells, "cell arithmetic mismatch"))
+
+        bad_nodes = deepcopy(valid)
+        bad_nodes["single_day_refinement"]["nodes_total"] += 1
+        cases.append(("nodes", bad_nodes, "node arithmetic mismatch"))
+
+        impossible_nodes = deepcopy(valid)
+        impossible_nodes["single_day_refinement"].update(
+            {"nodes_total": 1, "nodes_exact": 1}
+        )
+        cases.append(
+            ("node geometry", impossible_nodes, "node geometry is impossible")
+        )
+
+        bad_max_page = deepcopy(valid)
+        bad_max_page["single_day_refinement"]["max_page_requested"] = 3
+        cases.append(("page ceiling", bad_max_page, "page-2 ceiling"))
+
+        bad_pages = deepcopy(valid)
+        bad_pages["single_day_refinement"].update(
+            {"accepted_pages": 0, "probe_pages": 0}
+        )
+        cases.append(("page metrics", bad_pages, "page metrics are inconsistent"))
+
+        impossible_pages = deepcopy(valid)
+        impossible_pages["single_day_refinement"]["accepted_pages"] = 10**9
+        cases.append(
+            (
+                "unbounded page metrics",
+                impossible_pages,
+                "page metrics exceed bounded retries",
+            )
+        )
+
+        missing_seal = deepcopy(valid)
+        missing_seal["single_day_refinement"].update(
+            {"seals_total": 0, "seals_valid": 0}
+        )
+        cases.append(("seal", missing_seal, "covered cell lacks a valid seal"))
+
+        bad_error_count = deepcopy(valid)
+        bad_error_count["single_day_refinement"]["raw_replay_errors"] = [
+            "fixture:raw"
+        ]
+        cases.append(("RAW error count", bad_error_count, "error count mismatch"))
+
+        ignored_raw_error = deepcopy(valid)
+        ignored_raw_error["single_day_refinement"].update(
+            {
+                "raw_replay_error_count": 1,
+                "raw_replay_errors": ["fixture:raw"],
+            }
+        )
+        cases.append(("RAW error flag", ignored_raw_error, "ignores RAW replay errors"))
+
+        bad_duplicate_count = deepcopy(valid)
+        bad_duplicate_count["single_day_refinement"]["duplicate_observations"] = True
+        cases.append(("duplicates", bad_duplicate_count, "duplicate_observations"))
+
+        bad_identity_count = deepcopy(valid)
+        bad_identity_count["single_day_refinement"]["identity_conflicts"] = [
+            "fixture:identity"
+        ]
+        cases.append(
+            ("identity count", bad_identity_count, "identity conflict count mismatch")
+        )
+
+        for name, progress, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(
+                AssertionError, message
+            ):
+                assert_active_interval_coverage_contract(progress)
+
+    def test_terminal_refinement_rejects_unfinished_or_conflicting_state(
+        self,
+    ) -> None:
+        valid = attach_covered_single_day_refinement(
+            interval_coverage_progress()
+        )
+        cases: list[tuple[str, dict, str]] = []
+
+        refining = deepcopy(valid)
+        refining["single_day_refinement"].update(
+            {"cells_total": 2, "cells_refining": 1}
+        )
+        cases.append(("refining", refining, "still has refining cells"))
+
+        pending = deepcopy(valid)
+        pending["single_day_refinement"].update(
+            {"nodes_total": 170, "nodes_pending": 1}
+        )
+        cases.append(("pending", pending, "still has pending nodes"))
+
+        pending_page2 = deepcopy(valid)
+        pending_page2["single_day_refinement"].update(
+            {"nodes_total": 170, "nodes_pending_page2": 1}
+        )
+        cases.append(
+            ("pending page2", pending_page2, "still has pending page-2 nodes")
+        )
+
+        blocked = deepcopy(valid)
+        blocked["single_day_refinement"].update(
+            {"nodes_total": 170, "nodes_blocked": 1}
+        )
+        cases.append(("blocked", blocked, "still has blocked nodes"))
+
+        blocked_cell = deepcopy(valid)
+        blocked_interval = blocked_cell["coverage"]["intervals"][0]
+        blocked_interval.update(
+            {
+                "state": "terminal_gap",
+                "terminal_reason": "single_day_type_refinement_blocked:fixture",
+            }
+        )
+        blocked_coverage = blocked_cell["coverage"]
+        blocked_coverage["units_covered"] -= 1
+        blocked_coverage["units_gap"] += 1
+        blocked_coverage["leaves_covered"] -= 1
+        blocked_coverage["leaves_gap"] += 1
+        blocked_coverage["coverage_percent"] = round(
+            100.0
+            * blocked_coverage["units_covered"]
+            / (
+                blocked_coverage["units_covered"]
+                + blocked_coverage["units_gap"]
+                + blocked_coverage["units_pending"]
+            ),
+            6,
+        )
+        blocked_coverage["complete"] = False
+        blocked_cell["phase"] = "complete_with_gaps"
+        blocked_cell["single_day_refinement"] = single_day_refinement_status(
+            state="blocked"
+        )
+        cases.append(("blocked cell", blocked_cell, "still has blocked cells"))
+
+        invalid_replay = deepcopy(valid)
+        invalid_replay["single_day_refinement"]["raw_replay_valid"] = False
+        cases.append(("RAW replay", invalid_replay, "RAW replay is invalid"))
+
+        identity = deepcopy(valid)
+        identity["single_day_refinement"].update(
+            {
+                "identity_conflict_count": 1,
+                "identity_conflicts": ["fixture:identity"],
+            }
+        )
+        cases.append(("identity", identity, "has identity conflicts"))
+
+        overlap = deepcopy(valid)
+        overlap["single_day_refinement"]["overlap_count"] = 1
+        cases.append(("overlap", overlap, "has overlap conflicts"))
+
+        for name, progress, message in cases:
+            with self.subTest(name=name), self.assertRaisesRegex(
+                AssertionError, message
+            ):
+                assert_active_interval_coverage_contract(progress)
+
     def test_complete_progressive_coverage_is_not_snapshot_authority(self) -> None:
         last_authority, _ = cardinality_fixture()
         progress = interval_coverage_progress(last_authority=last_authority)
