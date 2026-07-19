@@ -125,7 +125,10 @@ class RemoteContractTests(unittest.TestCase):
                     "active_scan": {
                         "available": False,
                         "reason": "official_database_metadata_absent",
-                    }
+                    },
+                    "still_missing": {
+                        "active_refresh_sweep": {"complete": False}
+                    },
                 },
             )
 
@@ -143,6 +146,9 @@ class RemoteContractTests(unittest.TestCase):
                     }
                 ],
                 "assets": assets,
+                "still_missing": {
+                    "active_refresh_sweep": {"complete": False}
+                },
             }
             (data / "manifest.json").write_text(
                 json.dumps(manifest), encoding="utf-8"
@@ -182,9 +188,7 @@ class RemoteContractTests(unittest.TestCase):
                     check_remote(base_url, "remote-test", wait_seconds=0)
                 stale.write_bytes(stale.read_bytes()[:-1])
 
-                manifest["still_missing"] = {
-                    "active_refresh_sweep": {"complete": False}
-                }
+                manifest["still_missing"] = {}
                 (data / "manifest.json").write_text(
                     json.dumps(manifest), encoding="utf-8"
                 )
@@ -192,7 +196,9 @@ class RemoteContractTests(unittest.TestCase):
                     AssertionError, "remote snapshot did not converge"
                 ):
                     check_remote(base_url, "remote-test", wait_seconds=0)
-                manifest.pop("still_missing")
+                manifest["still_missing"] = {
+                    "active_refresh_sweep": {"complete": False}
+                }
 
                 write_asset(
                     "fetch_status.json",
