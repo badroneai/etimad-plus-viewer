@@ -32,6 +32,9 @@ ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION = 1
 CARDINALITY_SEAL_SCHEMA_VERSION = 4
 CARDINALITY_SEAL_STRATEGY = "cardinality_seal_v1"
 CARDINALITY_SEAL_MODE = "official_active_cardinality_seal"
+INTERVAL_COVERAGE_SCHEMA_VERSION = 5
+INTERVAL_COVERAGE_STRATEGY = "deadline_interval_coverage_v1"
+INTERVAL_COVERAGE_MODE = "official_active_interval_sweep"
 ACTIVE_LIST_ENDPOINT = (
     "https://tenders.etimad.sa/Tender/AllSupplierTendersForVisitorAsync"
 )
@@ -2746,6 +2749,36 @@ def selected_cardinality_authority(
     return None
 
 
+def active_refresh_sweep_complete(progress: Any) -> bool:
+    """Return process completion without promoting interval coverage to authority."""
+
+    if not isinstance(progress, dict):
+        return False
+    if progress.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION:
+        authority = selected_cardinality_authority(progress)
+        return bool(
+            authority is not None
+            and authority.get("completion_authoritative") is True
+        )
+    if progress.get("schema_version") != INTERVAL_COVERAGE_SCHEMA_VERSION:
+        return False
+    coverage = progress.get("coverage")
+    authority_flags = (
+        "instantaneous_snapshot_authoritative",
+        "snapshot_authoritative",
+        "union_authoritative",
+        "partition_authoritative",
+        "absence_authoritative",
+        "completion_authoritative",
+    )
+    return bool(
+        isinstance(coverage, dict)
+        and coverage.get("complete") is True
+        and coverage.get("raw_replay_valid") is True
+        and all(progress.get(key) is False for key in authority_flags)
+    )
+
+
 def attach_active_scan_authority_descriptor(
     active_scan: dict[str, Any],
     authority_payload: dict[str, Any],
@@ -2796,6 +2829,11 @@ def load_active_scan_authority(
             if authority_progress is not None
             else None
         )
+    if progress.get("schema_version") == INTERVAL_COVERAGE_SCHEMA_VERSION:
+        # A progressive interval sweep spans multiple observation times.  It is
+        # useful coverage evidence, but it cannot be serialized as an
+        # instantaneous union/absence authority asset.
+        return None
     return _load_hybrid_active_scan_authority(database, active_scan)
 
 
@@ -4022,11 +4060,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     still_missing = dict(fetch_status.get("still_missing") or {})
     date_fallback = active_scan_status.get("date_fallback")
-    selected_authority = selected_cardinality_authority(date_fallback)
-    active_scan_complete = bool(
-        selected_authority is not None
-        and selected_authority.get("completion_authoritative") is True
-    )
+    active_scan_complete = active_refresh_sweep_complete(date_fallback)
     still_missing.update(
         {
             "official_universe_backfill": {

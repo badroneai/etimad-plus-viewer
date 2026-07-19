@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from export_warehouse import (  # noqa: E402
     AWARDED_INDEX_PART_COUNT,
@@ -39,6 +40,10 @@ from check_data_contract import (  # noqa: E402
     assert_awarded_lifecycle_contract,
     assert_region_backfill_contract,
     check,
+)
+from schema5_fixtures import (  # noqa: E402
+    interval_coverage_progress,
+    outer_active_scan,
 )
 
 
@@ -986,6 +991,73 @@ class ExportContractTests(unittest.TestCase):
                 "d" * 64,
             )
             self.assertEqual(manifest["snapshot_id"], "test_snapshot")
+            self.assertEqual(check(root)["awarded"], 1)
+
+    def test_schema5_coverage_removes_stale_authority_and_preserves_data_export(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database = root / "official.sqlite3"
+            progress = interval_coverage_progress()
+            active_scan = outer_active_scan(progress)
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE baseline_tenders (
+                  reference_number TEXT PRIMARY KEY,seed_state TEXT,source_layer TEXT,
+                  imported_at TEXT,record_json TEXT,source_fetched_at TEXT
+                );
+                INSERT INTO baseline_tenders VALUES
+                  ('SCHEMA5-AWARD','awarded','phase0/awarded',
+                   '2026-07-18T11:00:00+00:00',
+                   '{"ref":"SCHEMA5-AWARD","winAmount":1}',
+                   '2026-07-18T10:00:00+00:00');
+                CREATE TABLE meta (key TEXT PRIMARY KEY,value TEXT);
+                """
+            )
+            connection.executemany(
+                "INSERT INTO meta VALUES (?,?)",
+                (
+                    (
+                        "baseline_awarded",
+                        json.dumps(
+                            {
+                                "source_has_more": True,
+                                "source_partial": True,
+                                "source_complete": False,
+                                "source_fetched_at": "2026-07-18T10:00:00+00:00",
+                            }
+                        ),
+                    ),
+                    ("active_scan", json.dumps(active_scan)),
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            lock = write_phase0_lock(root / "PHASE0_BASELINE.lock.json")
+            data = root / "data"
+            data.mkdir()
+            stale_authority = data / "active_scan_authority.json"
+            stale_authority.write_text('{"stale":true}', encoding="utf-8")
+
+            manifest = build(build_args(root, database, lock))
+            status = json.loads((data / "fetch_status.json").read_text())
+            self.assertFalse(stale_authority.exists())
+            self.assertNotIn("active_scan_authority.json", manifest["assets"])
+            self.assertEqual(status["active_scan"], active_scan)
+            self.assertNotIn("active_refresh_sweep", status["still_missing"])
+
+            awarded = json.loads((data / "awarded_index.json").read_text())
+            self.assertEqual(awarded["count"], 1)
+            part = f"{index_part_for_ref('SCHEMA5-AWARD'):02d}"
+            rows = json.loads(
+                (data / f"awarded_index_parts/{part}.json").read_text()
+            )["records"]
+            row = next(item for item in rows if item["ref"] == "SCHEMA5-AWARD")
+            detail = json.loads(
+                (data / f"awarded_details/{row['_detailShard']}.json").read_text()
+            )["records"]
+            self.assertTrue(any(item["ref"] == "SCHEMA5-AWARD" for item in detail))
             self.assertEqual(check(root)["awarded"], 1)
 
     def test_progress_contract_rejects_bad_arithmetic_and_missing_evidence(self):
