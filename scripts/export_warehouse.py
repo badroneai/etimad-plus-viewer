@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import parse_qs, urlsplit
 
 
 SCHEMA_VERSION = 3
@@ -28,6 +29,32 @@ AWARDED_INDEX_PART_FORMAT_VERSION = 1
 AWARDED_INDEX_PART_ALGORITHM = "sha256_first_byte_mod_16"
 ACTIVE_SCAN_AUTHORITY_FILE = "active_scan_authority.json"
 ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION = 1
+CARDINALITY_SEAL_SCHEMA_VERSION = 4
+CARDINALITY_SEAL_STRATEGY = "cardinality_seal_v1"
+CARDINALITY_SEAL_MODE = "official_active_cardinality_seal"
+ACTIVE_LIST_ENDPOINT = (
+    "https://tenders.etimad.sa/Tender/AllSupplierTendersForVisitorAsync"
+)
+ACTIVE_LIST_REQUIRED_PARAMS = {
+    "TenderCategory": "2",
+    "PublishDateId": "1",
+    "SortDirection": "DESC",
+    "Sort": "SubmitionDate",
+    "IsSearch": "true",
+}
+ACTIVE_CENSUS_FILTER_KEYS = (
+    "TenderTypeId",
+    "TenderAreasIdString",
+    "ConditionaBookletRange",
+    "TenderActivityId",
+    "AgencyCode",
+)
+ACTIVE_CENSUS_TAXONOMY_ENDPOINTS = {
+    "type": "/Qualification/GetTenderTypes",
+    "area": "/Tender/GetAreasAsync",
+    "activity": "/Tender/GetMainActivitiesAsync",
+    "agency": "/Tender/GetAllAgenciesAsync",
+}
 SAUDI_TIMEZONE = timezone(timedelta(hours=3))
 HERE = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = HERE / "data"
@@ -1042,7 +1069,242 @@ def _verify_boundary_raw_payload(
         raise RuntimeError(f"{label} RAW body differs from its boundary descriptor")
 
 
-def load_active_scan_authority(
+def _canonical_bijection_sha256(mappings: Iterable[dict[str, Any]]) -> str:
+    """Hash a one-to-one reference/tender-id mapping using the official format."""
+
+    canonical: dict[str, str] = {}
+    reference_by_tender_id: dict[str, str] = {}
+    for row in mappings:
+        if not isinstance(row, dict):
+            raise RuntimeError("active census mapping must be an object")
+        reference = str(row.get("reference_number") or "").strip()
+        tender_id = str(row.get("tender_id") or "").strip()
+        if not reference or not tender_id:
+            raise RuntimeError("active census mapping has a blank reference or tender id")
+        known_id = canonical.get(reference)
+        known_reference = reference_by_tender_id.get(tender_id)
+        if known_id is not None and known_id != tender_id:
+            raise RuntimeError("active census reference maps to two tender ids")
+        if known_reference is not None and known_reference != reference:
+            raise RuntimeError("active census tender id maps to two references")
+        canonical.setdefault(reference, tender_id)
+        reference_by_tender_id.setdefault(tender_id, reference)
+    payload = "".join(
+        f"{reference}\t{canonical[reference]}\n" for reference in sorted(canonical)
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _normalise_mapping_list(value: Any, *, label: str) -> list[dict[str, str]]:
+    parsed = parse_json_value(value)
+    if isinstance(parsed, dict):
+        rows: list[Any] = [
+            {"reference_number": reference, "tender_id": tender_id}
+            for reference, tender_id in parsed.items()
+        ]
+    elif isinstance(parsed, list):
+        rows = parsed
+    else:
+        raise RuntimeError(f"{label} mappings must be a JSON list")
+    result: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError(f"{label} mapping row must be an object")
+        reference = row.get("reference_number", row.get("referenceNumber", row.get("ref")))
+        tender_id = row.get("tender_id", row.get("tenderId", row.get("id")))
+        reference_text = str(reference or "").strip()
+        tender_text = str(tender_id or "").strip()
+        if not reference_text or not tender_text:
+            raise RuntimeError(f"{label} mapping has a blank reference or tender id")
+        result.append(
+            {"reference_number": reference_text, "tender_id": tender_text}
+        )
+    return result
+
+
+def _read_official_json(
+    warehouse_root: Path,
+    raw_path: Any,
+    *,
+    label: str,
+) -> Any:
+    _, resolved = _resolve_official_raw_file(warehouse_root, raw_path, label=label)
+    try:
+        return json.loads(resolved.read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} RAW body is not valid JSON") from exc
+
+
+def _list_payload_rows(payload: Any, *, label: str) -> tuple[list[dict[str, Any]], int]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise RuntimeError(f"{label} RAW body has no data list")
+    if any(not isinstance(row, dict) for row in payload["data"]):
+        raise RuntimeError(f"{label} RAW data contains a non-object row")
+    total = payload.get("totalCount")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise RuntimeError(f"{label} RAW totalCount is invalid")
+    return payload["data"], total
+
+
+def _row_reference_mapping(row: dict[str, Any], *, label: str) -> dict[str, str]:
+    reference = str(row.get("referenceNumber") or "").strip()
+    tender_id = str(row.get("tenderId") or "").strip()
+    if not reference or not tender_id:
+        raise RuntimeError(f"{label} RAW row lacks referenceNumber or tenderId")
+    return {"reference_number": reference, "tender_id": tender_id}
+
+
+def _assert_active_list_url(
+    url: Any,
+    *,
+    page_number: int,
+    filters: dict[str, str],
+    label: str,
+) -> None:
+    actual = urlsplit(str(url or ""))
+    expected = urlsplit(ACTIVE_LIST_ENDPOINT)
+    if (actual.scheme, actual.netloc, actual.path) != (
+        expected.scheme,
+        expected.netloc,
+        expected.path,
+    ):
+        raise RuntimeError(f"{label} endpoint is not the official active-list endpoint")
+    query = parse_qs(actual.query, keep_blank_values=True)
+    expected_query = {
+        **ACTIVE_LIST_REQUIRED_PARAMS,
+        "PageSize": "24",
+        "PageNumber": str(page_number),
+        **filters,
+    }
+    unexpected = set(query) - set(expected_query) - {"_"}
+    if unexpected or any(query.get(key) != [value] for key, value in expected_query.items()):
+        raise RuntimeError(f"{label} active-list query semantics mismatch")
+
+
+def _verify_active_list_capture(
+    warehouse_root: Path,
+    capture: dict[str, Any],
+    *,
+    label: str,
+    page_number: int,
+    filters: dict[str, str],
+    require_mappings: bool,
+) -> tuple[list[str], list[dict[str, str]], int]:
+    content_type = str(capture.get("content_type") or "")
+    if capture.get("status") != 200 or (content_type and "json" not in content_type.lower()):
+        raise RuntimeError(f"{label} is not a saved official JSON 200")
+    _assert_active_list_url(
+        capture.get("url"),
+        page_number=page_number,
+        filters=filters,
+        label=label,
+    )
+    payload = _read_official_json(
+        warehouse_root,
+        capture.get("raw_path"),
+        label=label,
+    )
+    rows, total = _list_payload_rows(payload, label=label)
+    if payload.get("currentPage") != page_number or payload.get("pageSize") != 24:
+        raise RuntimeError(f"{label} RAW pagination metadata mismatch")
+    mappings = [_row_reference_mapping(row, label=label) for row in rows]
+    if any(str(row.get("tenderStatusId")) != "4" for row in rows):
+        raise RuntimeError(f"{label} RAW page contains a non-active row")
+    submitted = [parse_iso_datetime(row.get("submitionDate")) for row in rows]
+    if any(value is None for value in submitted) or any(
+        newer is not None and older is not None and newer > older
+        for older, newer in zip(submitted, submitted[1:])
+    ):
+        raise RuntimeError(f"{label} RAW page submission ordering is invalid")
+    references = [row["reference_number"] for row in mappings]
+    if len(references) != len(set(references)):
+        raise RuntimeError(f"{label} RAW page contains duplicate references")
+    if len({row["tender_id"] for row in mappings}) != len(mappings):
+        raise RuntimeError(f"{label} RAW page contains duplicate tender ids")
+    expected_records = min(24, max(0, total - 24 * (page_number - 1)))
+    if len(rows) != expected_records:
+        raise RuntimeError(f"{label} RAW page cardinality differs from totalCount")
+    expected_references = [str(item) for item in capture.get("references") or []]
+    if (
+        capture.get("total_count") != total
+        or capture.get("records") != len(rows)
+        or capture.get("bytes") != _resolve_official_raw_file(
+            warehouse_root, capture.get("raw_path"), label=label
+        )[1].stat().st_size
+        or expected_references != references
+        or (
+            capture.get("reference_sha256") is not None
+            and capture.get("reference_sha256") != reference_union_sha256(references)
+        )
+    ):
+        raise RuntimeError(f"{label} RAW body differs from its descriptor")
+    if require_mappings:
+        expected_mappings = _normalise_mapping_list(
+            capture.get("mappings"), label=label
+        )
+        if expected_mappings != mappings:
+            raise RuntimeError(f"{label} RAW mappings differ from their descriptor")
+    return references, mappings, total
+
+
+def _taxonomy_payload_rows(payload: Any, *, label: str) -> list[dict[str, Any]]:
+    rows: list[Any] | None = None
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for key in ("data", "items", "result", "results"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(f"{label} RAW taxonomy list is missing")
+    return rows
+
+
+def _taxonomy_values_from_raw(
+    payload: Any,
+    *,
+    kind: str,
+    label: str,
+) -> list[dict[str, str]]:
+    shapes = {
+        "type": ("tenderTypeId", "tenderTypeName"),
+        "area": ("id", "name"),
+        "activity": ("value", "text"),
+        "agency": ("agencyCode", "nameArabic"),
+    }
+    if kind not in shapes:
+        raise RuntimeError(f"{label} taxonomy kind is unsupported")
+    value_key, label_key = shapes[kind]
+    result: list[dict[str, str]] = []
+    for row in _taxonomy_payload_rows(payload, label=label):
+        value = str(row.get(value_key) or "").strip()
+        raw_display = row.get(label_key)
+        display = (
+            "__unknown_label__"
+            if raw_display in (None, "")
+            else str(raw_display).strip()
+        )
+        if not value or not display:
+            raise RuntimeError(f"{label} RAW taxonomy row lacks a value")
+        result.append({"value": value, "label": display})
+    return sorted(result, key=lambda row: row["value"])
+
+
+def _cardinality_taxonomy_sha256(
+    taxonomy: dict[str, list[dict[str, str]]],
+) -> str:
+    canonical = json.dumps(
+        taxonomy,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _load_hybrid_active_scan_authority(
     database: Path,
     active_scan: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -1570,6 +1832,971 @@ def load_active_scan_authority(
             "union_sha256": reference_union_sha256(union_refs),
         },
     }
+
+
+def _load_cardinality_seal_authority(
+    database: Path,
+    active_scan: dict[str, Any],
+    progress: dict[str, Any],
+) -> dict[str, Any]:
+    """Export schema-4 cardinality-seal evidence after replaying real RAW bytes."""
+
+    if progress.get("strategy") != CARDINALITY_SEAL_STRATEGY:
+        raise RuntimeError("schema-4 active census strategy is invalid")
+    if progress.get("mode") != CARDINALITY_SEAL_MODE:
+        raise RuntimeError("schema-4 active census mode is invalid")
+    cycle_id = str(progress.get("cycle_id") or active_scan.get("cycle_id") or "")
+    generation = progress.get("generation")
+    if not cycle_id:
+        raise RuntimeError("schema-4 active census cycle_id is missing")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise RuntimeError("schema-4 active census generation is invalid")
+
+    uri = f"file:{database.resolve()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        state_columns = {
+            "cycle_id",
+            "strategy",
+            "generation",
+            "phase",
+            "taxonomy_sha256",
+            "boundary_total_count",
+            "boundary_head_ref_sha256",
+            "opening_evidence_json",
+            "closing_evidence_json",
+            "observed_unique",
+            "unexplained_unique",
+            "pending_candidates",
+            "union_sha256",
+            "bijection_sha256",
+            "integrity_errors_json",
+            "last_reset_reason",
+            "page_ceiling_switches",
+            "proof_chain",
+            "created_at",
+            "updated_at",
+            "last_run_id",
+        }
+        if not state_columns.issubset(table_columns(connection, "active_census_state")):
+            raise RuntimeError("schema-4 active census state ledger is incomplete")
+        state_row = connection.execute(
+            "SELECT * FROM active_census_state WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()
+        if state_row is None:
+            raise RuntimeError("schema-4 active census state row is missing")
+        state = {key: state_row[key] for key in state_row.keys()}
+        if state["strategy"] != CARDINALITY_SEAL_STRATEGY:
+            raise RuntimeError("schema-4 active census state strategy mismatch")
+        if int(state["generation"]) != generation:
+            raise RuntimeError("schema-4 active census state generation mismatch")
+        state["generation"] = int(state["generation"])
+        state["boundary_total_count"] = (
+            int(state["boundary_total_count"])
+            if state["boundary_total_count"] is not None
+            else None
+        )
+        state["observed_unique"] = int(state["observed_unique"])
+        state["unexplained_unique"] = (
+            int(state["unexplained_unique"])
+            if state["unexplained_unique"] is not None
+            else None
+        )
+        state["pending_candidates"] = int(state["pending_candidates"])
+        state["page_ceiling_switches"] = int(state["page_ceiling_switches"])
+        state["proof_chain"] = int(state["proof_chain"])
+        state["integrity_errors"] = _json_list(
+            state.pop("integrity_errors_json"), label="active census integrity errors"
+        )
+        state["opening_evidence"] = (
+            _json_object(
+                state.pop("opening_evidence_json"),
+                label="active census opening boundary",
+            )
+            if state["opening_evidence_json"] not in (None, "")
+            else None
+        )
+        state["closing_evidence"] = (
+            _json_object(
+                state.pop("closing_evidence_json"),
+                label="active census closing boundary",
+            )
+            if state["closing_evidence_json"] not in (None, "")
+            else None
+        )
+
+        taxonomy_columns = {
+            "cycle_id",
+            "kind",
+            "endpoint",
+            "values_json",
+            "raw_path",
+            "sha256",
+            "url",
+            "status",
+            "content_type",
+            "bytes",
+            "captured_at",
+        }
+        if not taxonomy_columns.issubset(
+            table_columns(connection, "active_census_taxonomy")
+        ):
+            raise RuntimeError("schema-4 active census taxonomy ledger is incomplete")
+        taxonomy_rows_raw = connection.execute(
+            "SELECT * FROM active_census_taxonomy WHERE cycle_id=? ORDER BY kind",
+            (cycle_id,),
+        ).fetchall()
+        taxonomy_rows = []
+        for row in taxonomy_rows_raw:
+            taxonomy_rows.append(
+                {
+                    "kind": str(row["kind"]),
+                    "endpoint": str(row["endpoint"]),
+                    "values": _json_list(
+                        row["values_json"], label=f"active census taxonomy {row['kind']}"
+                    ),
+                    "raw_path": str(row["raw_path"]),
+                    "sha256": str(row["sha256"]),
+                    "url": str(row["url"]),
+                    "status": int(row["status"]),
+                    "content_type": row["content_type"],
+                    "bytes": int(row["bytes"]),
+                    "captured_at": str(row["captured_at"]),
+                }
+            )
+
+        node_columns = {
+            "cycle_id",
+            "generation",
+            "node_id",
+            "parent_node_id",
+            "depth",
+            "lens_name",
+            "filters_json",
+            "state",
+            "next_page",
+            "total_count",
+            "page_count",
+            "last_error",
+            "superseded_reason",
+            "superseded_union_sha256",
+            "superseded_generation",
+            "superseded_boundary_total_count",
+            "created_at",
+            "updated_at",
+            "last_run_id",
+        }
+        if not node_columns.issubset(table_columns(connection, "active_census_nodes")):
+            raise RuntimeError("schema-4 active census node ledger is incomplete")
+        node_rows = connection.execute(
+            "SELECT * FROM active_census_nodes WHERE cycle_id=? AND generation=? "
+            "ORDER BY depth,node_id",
+            (cycle_id, generation),
+        ).fetchall()
+        nodes = [
+            {
+                "node_id": str(row["node_id"]),
+                "parent_node_id": row["parent_node_id"],
+                "depth": int(row["depth"]),
+                "lens_name": row["lens_name"],
+                "filters": _json_object(
+                    row["filters_json"], label=f"active census node {row['node_id']}"
+                ),
+                "state": str(row["state"]),
+                "next_page": int(row["next_page"]),
+                "total_count": (
+                    int(row["total_count"]) if row["total_count"] is not None else None
+                ),
+                "page_count": int(row["page_count"]),
+                "last_error": row["last_error"],
+                "supersession": {
+                    "reason": row["superseded_reason"],
+                    "union_sha256": row["superseded_union_sha256"],
+                    "generation": (
+                        int(row["superseded_generation"])
+                        if row["superseded_generation"] is not None
+                        else None
+                    ),
+                    "boundary_total_count": (
+                        int(row["superseded_boundary_total_count"])
+                        if row["superseded_boundary_total_count"] is not None
+                        else None
+                    ),
+                },
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "last_run_id": row["last_run_id"],
+            }
+            for row in node_rows
+        ]
+        node_by_id = {row["node_id"]: row for row in nodes}
+
+        page_columns = {
+            "cycle_id",
+            "generation",
+            "node_id",
+            "page_number",
+            "total_count",
+            "records",
+            "references_json",
+            "mappings_json",
+            "raw_path",
+            "sha256",
+            "url",
+            "run_id",
+            "accepted_at",
+        }
+        if not page_columns.issubset(table_columns(connection, "active_census_pages")):
+            raise RuntimeError("schema-4 active census page ledger is incomplete")
+        pages_raw = connection.execute(
+            "SELECT * FROM active_census_pages WHERE cycle_id=? AND generation=? "
+            "ORDER BY node_id,page_number",
+            (cycle_id, generation),
+        ).fetchall()
+        pages = [
+            {
+                "node_id": str(row["node_id"]),
+                "page_number": int(row["page_number"]),
+                "total_count": int(row["total_count"]),
+                "records": int(row["records"]),
+                "references": _reference_list(
+                    row["references_json"],
+                    label=f"active census page {row['node_id']}:{row['page_number']}",
+                ),
+                "mappings": _normalise_mapping_list(
+                    row["mappings_json"],
+                    label=f"active census page {row['node_id']}:{row['page_number']}",
+                ),
+                "raw_path": str(row["raw_path"]),
+                "sha256": str(row["sha256"]),
+                "url": str(row["url"]),
+                "run_id": str(row["run_id"]),
+                "accepted_at": str(row["accepted_at"]),
+            }
+            for row in pages_raw
+        ]
+
+        candidate_columns = {
+            "cycle_id",
+            "generation",
+            "reference_number",
+            "source",
+            "state",
+            "status_id",
+            "tender_id",
+            "raw_path",
+            "sha256",
+            "url",
+            "attempts",
+            "error",
+            "checked_at",
+            "run_id",
+        }
+        if not candidate_columns.issubset(
+            table_columns(connection, "active_census_candidates")
+        ):
+            raise RuntimeError("schema-4 active census candidate ledger is incomplete")
+        candidates_raw = connection.execute(
+            "SELECT * FROM active_census_candidates WHERE cycle_id=? AND generation=? "
+            "ORDER BY reference_number",
+            (cycle_id, generation),
+        ).fetchall()
+
+        def candidate_descriptor(
+            row: sqlite3.Row, *, bound_generation: int
+        ) -> dict[str, Any]:
+            return {
+                "cycle_id": cycle_id,
+                "generation": bound_generation,
+                "reference_number": str(row["reference_number"]),
+                "source": str(row["source"]),
+                "state": str(row["state"]),
+                "status_id": (
+                    int(row["status_id"]) if row["status_id"] is not None else None
+                ),
+                "tender_id": row["tender_id"],
+                "raw_path": row["raw_path"],
+                "sha256": row["sha256"],
+                "url": row["url"],
+                "attempts": int(row["attempts"]),
+                "error": row["error"],
+                "checked_at": row["checked_at"],
+                "run_id": row["run_id"],
+            }
+
+        candidates = [
+            candidate_descriptor(row, bound_generation=generation)
+            for row in candidates_raw
+        ]
+
+        proof_columns = {
+            "cycle_id",
+            "generation",
+            "convergence_ordinal",
+            "boundary_total_count",
+            "boundary_head_ref_sha256",
+            "union_unique",
+            "union_sha256",
+            "bijection_sha256",
+            "references_json",
+            "mappings_json",
+            "boundary_evidence_json",
+            "taxonomy_sha256",
+            "node_evidence_json",
+            "candidate_evidence_json",
+            "chain_number",
+            "superseded_at",
+            "superseded_reason",
+            "run_id",
+            "closed_at",
+        }
+        if not proof_columns.issubset(
+            table_columns(connection, "active_census_generation_proofs")
+        ):
+            raise RuntimeError("schema-4 active census proof ledger is incomplete")
+        all_proof_rows = connection.execute(
+            "SELECT * FROM active_census_generation_proofs WHERE cycle_id=? "
+            "ORDER BY chain_number,convergence_ordinal,generation",
+            (cycle_id,),
+        ).fetchall()
+        proof_rows = [
+            row
+            for row in all_proof_rows
+            if row["superseded_at"] is None
+            and int(row["chain_number"] or 1) == state["proof_chain"]
+        ]
+        proofs: list[dict[str, Any]] = []
+        for row in proof_rows:
+            proof_generation = int(row["generation"])
+            candidate_evidence = _json_object(
+                row["candidate_evidence_json"],
+                label="active census proof candidates",
+            )
+            generation_candidate_rows = connection.execute(
+                "SELECT * FROM active_census_candidates WHERE cycle_id=? "
+                "AND generation=? ORDER BY reference_number",
+                (cycle_id, proof_generation),
+            ).fetchall()
+            unresolved = [
+                item
+                for item in generation_candidate_rows
+                if item["state"] in {"pending", "error"}
+            ]
+            if unresolved:
+                raise RuntimeError(
+                    "active census proof generation still has pending candidates"
+                )
+            superseded = [
+                candidate_descriptor(item, bound_generation=proof_generation)
+                for item in generation_candidate_rows
+                if item["state"] == "superseded_by_cardinality"
+            ]
+            superseded_references = [
+                str(item["reference_number"]) for item in superseded
+            ]
+            if (
+                candidate_evidence.get("superseded_by_cardinality_count")
+                != len(superseded)
+                or candidate_evidence.get("superseded_reference_sha256")
+                != reference_union_sha256(superseded_references)
+            ):
+                raise RuntimeError(
+                    "active census proof superseded-candidate summary mismatch"
+                )
+            candidate_evidence["superseded"] = superseded
+            proofs.append(
+                {
+                    "generation": int(row["generation"]),
+                    "convergence_ordinal": int(row["convergence_ordinal"]),
+                    "chain_number": int(row["chain_number"]),
+                    "superseded_at": row["superseded_at"],
+                    "superseded_reason": row["superseded_reason"],
+                    "boundary_total_count": int(row["boundary_total_count"]),
+                    "boundary_head_ref_sha256": str(
+                        row["boundary_head_ref_sha256"]
+                    ),
+                    "union_unique": int(row["union_unique"]),
+                    "union_sha256": str(row["union_sha256"]),
+                    "bijection_sha256": str(row["bijection_sha256"]),
+                    "references": _reference_list(
+                        row["references_json"], label="active census proof"
+                    ),
+                    "mappings": _normalise_mapping_list(
+                        row["mappings_json"], label="active census proof"
+                    ),
+                    "boundary_evidence": _json_object(
+                        row["boundary_evidence_json"],
+                        label="active census proof boundary",
+                    ),
+                    "taxonomy_sha256": str(row["taxonomy_sha256"]),
+                    "node_evidence": _json_object(
+                        row["node_evidence_json"], label="active census proof nodes"
+                    ),
+                    "candidate_evidence": candidate_evidence,
+                    "run_id": str(row["run_id"]),
+                    "closed_at": str(row["closed_at"]),
+                }
+            )
+        proof_ledger = [
+            {
+                "generation": int(row["generation"]),
+                "convergence_ordinal": int(row["convergence_ordinal"]),
+                "chain_number": int(row["chain_number"]),
+                "superseded_at": row["superseded_at"],
+                "superseded_reason": row["superseded_reason"],
+            }
+            for row in all_proof_rows
+        ]
+        expected_generations = [generation - 1, generation]
+        if (
+            len(proofs) != 2
+            or [proof["generation"] for proof in proofs] != expected_generations
+            or [proof["convergence_ordinal"] for proof in proofs] != [1, 2]
+            or any(proof["chain_number"] != state["proof_chain"] for proof in proofs)
+            or len({proof["run_id"] for proof in proofs}) != 2
+        ):
+            raise RuntimeError(
+                "active census authority lacks the adjacent current two-proof chain"
+            )
+        superseded_ledger_rows = 0
+        for ledger_row in proof_ledger:
+            superseded_at = ledger_row["superseded_at"]
+            superseded_reason = ledger_row["superseded_reason"]
+            ledger_chain = ledger_row["chain_number"]
+            if superseded_at is None:
+                if superseded_reason is not None or ledger_chain != state["proof_chain"]:
+                    raise RuntimeError(
+                        "active census proof ledger has an interleaved active chain"
+                    )
+            else:
+                if (
+                    not str(superseded_at)
+                    or not str(superseded_reason or "")
+                    or ledger_chain >= state["proof_chain"]
+                ):
+                    raise RuntimeError(
+                        "active census proof ledger supersession is invalid"
+                    )
+                superseded_ledger_rows += 1
+        proof_status = progress.get("generation_proofs")
+        if not isinstance(proof_status, dict) or any(
+            (
+                proof_status.get("recorded") != len(proofs),
+                proof_status.get("recorded_total") != len(proof_ledger),
+                proof_status.get("superseded") != superseded_ledger_rows,
+                proof_status.get("chain_number") != state["proof_chain"],
+                proof_status.get("generations") != expected_generations,
+                proof_status.get("ordinals") != [1, 2],
+                proof_status.get("authoritative") is not True,
+            )
+        ):
+            raise RuntimeError("active census proof status disagrees with its ledger")
+    finally:
+        connection.close()
+
+    warehouse_root = database.resolve().parent
+    raw_by_path: dict[str, dict[str, Any]] = {}
+
+    def verify_raw(raw_path: Any, sha256: Any, *, label: str) -> dict[str, Any]:
+        descriptor = _verify_official_raw_pointer(
+            warehouse_root, raw_path, sha256, label=label
+        )
+        prior = raw_by_path.get(descriptor["raw_path"])
+        if prior is not None and prior != descriptor:
+            raise RuntimeError(f"{label} RAW pointer has conflicting evidence")
+        raw_by_path[descriptor["raw_path"]] = descriptor
+        return descriptor
+
+    def verify_boundary(capture: Any, *, label: str) -> None:
+        if not isinstance(capture, dict):
+            raise RuntimeError(f"{label} boundary evidence is missing")
+        descriptor = verify_raw(capture.get("raw_path"), capture.get("sha256"), label=label)
+        if capture.get("bytes") != descriptor["bytes"]:
+            raise RuntimeError(f"{label} RAW byte count mismatch")
+        _verify_active_list_capture(
+            warehouse_root,
+            capture,
+            label=label,
+            page_number=1,
+            filters={},
+            require_mappings=False,
+        )
+
+    def verify_page(page: dict[str, Any], *, filters: dict[str, str], label: str) -> None:
+        descriptor = verify_raw(page.get("raw_path"), page.get("sha256"), label=label)
+        capture = {
+            **page,
+            "status": 200,
+            "content_type": "application/json",
+            "bytes": descriptor["bytes"],
+        }
+        references, mappings, total = _verify_active_list_capture(
+            warehouse_root,
+            capture,
+            label=label,
+            page_number=int(page["page_number"]),
+            filters=filters,
+            require_mappings=True,
+        )
+        if references != page["references"] or mappings != page["mappings"]:
+            raise RuntimeError(f"{label} page membership mismatch")
+        if total != page["total_count"]:
+            raise RuntimeError(f"{label} page total mismatch")
+
+    def verify_candidate(candidate: dict[str, Any], *, label: str) -> None:
+        state_name = str(candidate.get("state") or "")
+        raw_path = candidate.get("raw_path")
+        sha256 = candidate.get("sha256")
+        if state_name == "superseded_by_cardinality":
+            if (
+                candidate.get("status_id") is not None
+                or candidate.get("tender_id") is not None
+                or raw_path is not None
+                or sha256 is not None
+                or candidate.get("url") is not None
+                or candidate.get("error") != "union_reached_boundary_cardinality"
+            ):
+                raise RuntimeError(f"{label} superseded candidate is not provenance-safe")
+            return
+        if raw_path in (None, "") and sha256 in (None, ""):
+            if candidate.get("state") not in {"pending", "error"}:
+                raise RuntimeError(f"{label} checked candidate lacks RAW evidence")
+            return
+        verify_raw(raw_path, sha256, label=label)
+        reference = str(candidate.get("reference_number") or "")
+        if not reference.isdigit():
+            raise RuntimeError(f"{label} candidate reference is not numeric")
+        _assert_active_list_url(
+            candidate.get("url"),
+            page_number=1,
+            filters={"ReferenceNumber": reference},
+            label=label,
+        )
+        payload = _read_official_json(warehouse_root, raw_path, label=label)
+        rows, _ = _list_payload_rows(payload, label=label)
+        matching = [
+            row for row in rows if str(row.get("referenceNumber") or "") == reference
+        ]
+        active_matches = [row for row in matching if row.get("tenderStatusId") == 4]
+        if state_name in {"included", "verified_active"}:
+            if len(active_matches) != 1:
+                raise RuntimeError(f"{label} included candidate is not exactly one status-4 row")
+            mapping = _row_reference_mapping(active_matches[0], label=label)
+            if str(candidate.get("status_id")) != "4" or str(
+                candidate.get("tender_id") or ""
+            ) != mapping["tender_id"]:
+                raise RuntimeError(f"{label} included candidate descriptor mismatch")
+        elif state_name in {"excluded", "verified_nonactive"}:
+            if active_matches:
+                raise RuntimeError(f"{label} excluded candidate still has status 4")
+
+    def verify_node_supersession(
+        node: dict[str, Any],
+        *,
+        expected_generation: int,
+        expected_union_sha256: str,
+        expected_boundary_total: int,
+        label: str,
+    ) -> None:
+        supersession = node.get("supersession")
+        if not isinstance(supersession, dict) or set(supersession) != {
+            "reason",
+            "union_sha256",
+            "generation",
+            "boundary_total_count",
+        }:
+            raise RuntimeError(f"{label} supersession binding is incomplete")
+        if node.get("state") == "superseded_by_cardinality":
+            if supersession != {
+                "reason": "union_reached_boundary_cardinality",
+                "union_sha256": expected_union_sha256,
+                "generation": expected_generation,
+                "boundary_total_count": expected_boundary_total,
+            }:
+                raise RuntimeError(f"{label} cardinality supersession binding mismatch")
+        elif any(value is not None for value in supersession.values()):
+            raise RuntimeError(f"{label} unexpected supersession binding")
+
+    verify_boundary(state["opening_evidence"], label="active census opening")
+    if state["closing_evidence"] is not None:
+        verify_boundary(state["closing_evidence"], label="active census closing")
+
+    taxonomy: dict[str, list[dict[str, str]]] = {
+        "booklet": [
+            {"value": str(value), "label": str(value)} for value in range(7)
+        ]
+    }
+    for row in taxonomy_rows:
+        kind = row["kind"]
+        expected_endpoint = ACTIVE_CENSUS_TAXONOMY_ENDPOINTS.get(kind)
+        endpoint_value = urlsplit(row["endpoint"])
+        endpoint_path = endpoint_value.path if endpoint_value.scheme else row["endpoint"]
+        if expected_endpoint is None or endpoint_path != expected_endpoint:
+            raise RuntimeError(f"active census taxonomy endpoint mismatch: {kind}")
+        actual_url = urlsplit(row["url"])
+        if (
+            actual_url.scheme != "https"
+            or actual_url.netloc != "tenders.etimad.sa"
+            or actual_url.path != expected_endpoint
+            or set(parse_qs(actual_url.query, keep_blank_values=True)) - {"_"}
+        ):
+            raise RuntimeError(f"active census taxonomy URL mismatch: {kind}")
+        descriptor = verify_raw(
+            row["raw_path"], row["sha256"], label=f"active census taxonomy {kind}"
+        )
+        if (
+            row["status"] != 200
+            or (
+                row["content_type"]
+                and "json" not in str(row["content_type"]).lower()
+            )
+            or row["bytes"] != descriptor["bytes"]
+        ):
+            raise RuntimeError(f"active census taxonomy response metadata mismatch: {kind}")
+        values = _taxonomy_values_from_raw(
+            _read_official_json(
+                warehouse_root,
+                row["raw_path"],
+                label=f"active census taxonomy {kind}",
+            ),
+            kind=kind,
+            label=f"active census taxonomy {kind}",
+        )
+        expected_values = [
+            {"value": str(item.get("value") or ""), "label": str(item.get("label") or "")}
+            for item in row["values"]
+            if isinstance(item, dict)
+        ]
+        expected_values.sort(key=lambda item: item["value"])
+        if values != expected_values or any(
+            not item["value"] or not item["label"] for item in expected_values
+        ):
+            raise RuntimeError(f"active census taxonomy RAW values mismatch: {kind}")
+        taxonomy[kind] = expected_values
+    if set(taxonomy) != {"type", "area", "activity", "agency", "booklet"}:
+        raise RuntimeError("active census taxonomy kinds are incomplete")
+    taxonomy_sha = _cardinality_taxonomy_sha256(taxonomy)
+    if taxonomy_sha != state["taxonomy_sha256"]:
+        raise RuntimeError("active census taxonomy SHA-256 mismatch")
+
+    for page in pages:
+        node = node_by_id.get(page["node_id"])
+        if node is None:
+            raise RuntimeError("active census page has no frontier node")
+        filters = {str(key): str(value) for key, value in node["filters"].items()}
+        verify_page(
+            page,
+            filters=filters,
+            label=f"active census page {page['node_id']}:{page['page_number']}",
+        )
+    for candidate in candidates:
+        verify_candidate(
+            candidate,
+            label=f"active census candidate {candidate['reference_number']}",
+        )
+
+    for proof in proofs:
+        boundary = proof["boundary_evidence"]
+        verify_boundary(
+            boundary.get("opening"),
+            label=f"active census generation {proof['generation']} opening",
+        )
+        verify_boundary(
+            boundary.get("closing"),
+            label=f"active census generation {proof['generation']} closing",
+        )
+        node_evidence = proof["node_evidence"]
+        proof_nodes = node_evidence.get("nodes")
+        proof_pages = node_evidence.get("pages")
+        if not isinstance(proof_nodes, list) or not isinstance(proof_pages, list):
+            raise RuntimeError("active census proof node evidence is incomplete")
+        proof_node_by_id: dict[str, dict[str, Any]] = {}
+        for item in proof_nodes:
+            if not isinstance(item, dict) or not item.get("node_id"):
+                raise RuntimeError("active census proof node row is invalid")
+            proof_node_by_id[str(item["node_id"])] = item
+            verify_node_supersession(
+                item,
+                expected_generation=int(proof["generation"]),
+                expected_union_sha256=str(proof["union_sha256"]),
+                expected_boundary_total=int(proof["boundary_total_count"]),
+                label=(
+                    f"active census generation {proof['generation']} node "
+                    f"{item['node_id']}"
+                ),
+            )
+        for item in proof_pages:
+            if not isinstance(item, dict):
+                raise RuntimeError("active census proof page row is invalid")
+            proof_node = proof_node_by_id.get(str(item.get("node_id") or ""))
+            if proof_node is None:
+                raise RuntimeError("active census proof page has no exact node")
+            proof_filters_raw = proof_node.get("filters")
+            if not isinstance(proof_filters_raw, dict):
+                raise RuntimeError("active census proof node filters are invalid")
+            proof_filters = {
+                str(key): str(value) for key, value in proof_filters_raw.items()
+            }
+            verify_page(
+                item,
+                filters=proof_filters,
+                label=(
+                    f"active census generation {proof['generation']} page "
+                    f"{item.get('node_id')}:{item.get('page_number')}"
+                ),
+            )
+        candidate_evidence = proof["candidate_evidence"].get("checks")
+        if not isinstance(candidate_evidence, list):
+            raise RuntimeError("active census proof candidate evidence is incomplete")
+        for item in candidate_evidence:
+            if not isinstance(item, dict):
+                raise RuntimeError("active census proof candidate row is invalid")
+            verify_candidate(
+                item,
+                label=(
+                    f"active census generation {proof['generation']} candidate "
+                    f"{item.get('reference_number')}"
+                ),
+            )
+        proof_membership_mappings: list[dict[str, Any]] = []
+        for item in proof_pages:
+            if not isinstance(item, dict):
+                raise RuntimeError("active census proof page row is invalid")
+            proof_membership_mappings.extend(
+                _normalise_mapping_list(
+                    item.get("mappings"), label="active census proof page"
+                )
+            )
+        proof_membership_mappings.extend(
+            {
+                "reference_number": str(item["reference_number"]),
+                "tender_id": str(item["tender_id"]),
+            }
+            for item in candidate_evidence
+            if isinstance(item, dict)
+            and item.get("state") in {"included", "verified_active"}
+            and item.get("status_id") == 4
+            and item.get("tender_id") not in (None, "")
+        )
+        _canonical_bijection_sha256(proof_membership_mappings)
+        proof_mapping_by_ref = {
+            str(item["reference_number"]): str(item["tender_id"])
+            for item in proof_membership_mappings
+        }
+        proof_references = sorted(proof_mapping_by_ref)
+        proof_mapping_rows = [
+            {
+                "reference_number": reference,
+                "tender_id": proof_mapping_by_ref[reference],
+            }
+            for reference in proof_references
+        ]
+        if (
+            proof_references != proof["references"]
+            or proof_mapping_rows != proof["mappings"]
+            or len(proof_references) != proof["boundary_total_count"]
+            or reference_union_sha256(proof_references) != proof["union_sha256"]
+            or _canonical_bijection_sha256(proof_membership_mappings)
+            != proof["bijection_sha256"]
+            or any(
+                node.get("state") in {"pending", "blocked", "error"}
+                for node in proof_nodes
+                if isinstance(node, dict)
+            )
+        ):
+            raise RuntimeError("active census proof membership replay is inconsistent")
+
+    membership_mappings: list[dict[str, str]] = []
+    for page in pages:
+        page_mappings = page.get("mappings")
+        if not isinstance(page_mappings, list):
+            raise RuntimeError("active census current page mappings are invalid")
+        for mapping in page_mappings:
+            if not isinstance(mapping, dict):
+                raise RuntimeError("active census current page mapping is invalid")
+            reference = mapping.get("reference_number")
+            tender_id = mapping.get("tender_id")
+            if not isinstance(reference, str) or not isinstance(tender_id, str):
+                raise RuntimeError("active census current page mapping is incomplete")
+            membership_mappings.append(
+                {"reference_number": reference, "tender_id": tender_id}
+            )
+    membership_mappings.extend(
+        {
+            "reference_number": candidate["reference_number"],
+            "tender_id": str(candidate["tender_id"]),
+        }
+        for candidate in candidates
+        if candidate["state"] in {"included", "verified_active"}
+        and candidate["status_id"] == 4
+        and candidate["tender_id"] not in (None, "")
+    )
+    canonical_membership: dict[str, str] = {}
+    tender_to_ref: dict[str, str] = {}
+    for mapping in membership_mappings:
+        reference = mapping["reference_number"]
+        tender_id = mapping["tender_id"]
+        known_id = canonical_membership.get(reference)
+        known_ref = tender_to_ref.get(tender_id)
+        if known_id is not None and known_id != tender_id:
+            raise RuntimeError("active census current reference mapping conflicts")
+        if known_ref is not None and known_ref != reference:
+            raise RuntimeError("active census current tender-id mapping conflicts")
+        canonical_membership.setdefault(reference, tender_id)
+        tender_to_ref.setdefault(tender_id, reference)
+    membership_refs = sorted(canonical_membership)
+    union_sha = reference_union_sha256(membership_refs)
+    bijection_sha = _canonical_bijection_sha256(membership_mappings)
+    if (
+        state["observed_unique"] != len(membership_refs)
+        or state["union_sha256"] != union_sha
+        or state["bijection_sha256"] != bijection_sha
+    ):
+        raise RuntimeError("active census current membership ledger is inconsistent")
+    for node in nodes:
+        verify_node_supersession(
+            node,
+            expected_generation=generation,
+            expected_union_sha256=union_sha,
+            expected_boundary_total=len(membership_refs),
+            label=f"active census node {node['node_id']}",
+        )
+    if (
+        state["phase"] != "authoritative"
+        or progress.get("union_authoritative") is not True
+        or state["boundary_total_count"] != len(membership_refs)
+        or state["pending_candidates"] != 0
+        or state["integrity_errors"]
+        or any(
+            node.get("state") in {"pending", "blocked", "error"}
+            for node in nodes
+        )
+    ):
+        raise RuntimeError("active census authority is not an exact closed cardinality seal")
+
+    raw_files = [raw_by_path[path] for path in sorted(raw_by_path)]
+    return {
+        "schema_version": CARDINALITY_SEAL_SCHEMA_VERSION,
+        "strategy": CARDINALITY_SEAL_STRATEGY,
+        "mode": CARDINALITY_SEAL_MODE,
+        "cycle_id": cycle_id,
+        "generation": generation,
+        "phase": state["phase"],
+        "union_authoritative": bool(progress.get("union_authoritative")),
+        "partition_authoritative": bool(progress.get("partition_authoritative")),
+        "absence_authoritative": bool(progress.get("absence_authoritative")),
+        "completion_authoritative": bool(progress.get("completion_authoritative")),
+        "complete": bool(progress.get("complete")),
+        "raw_verification": {
+            "mode": "export_time_official_warehouse_bytes",
+            "verified_files": len(raw_files),
+            "verified_bytes": sum(item["bytes"] for item in raw_files),
+            "files": raw_files,
+        },
+        "state": state,
+        "boundary": {
+            "opening": state["opening_evidence"],
+            "closing": state["closing_evidence"],
+        },
+        "taxonomy": {
+            "sha256": taxonomy_sha,
+            "values": taxonomy,
+            "captures": taxonomy_rows,
+        },
+        "frontier": {"nodes": nodes, "pages": pages},
+        "candidates": candidates,
+        "membership": {
+            "references": membership_refs,
+            "mappings": sorted(
+                (
+                    {
+                        "reference_number": reference,
+                        "tender_id": canonical_membership[reference],
+                    }
+                    for reference in canonical_membership
+                ),
+                key=lambda row: row["reference_number"],
+            ),
+            "union_sha256": union_sha,
+            "bijection_sha256": bijection_sha,
+        },
+        "generation_proofs": proofs,
+        "generation_proof_ledger": proof_ledger,
+    }
+
+
+def selected_cardinality_authority(
+    progress: Any,
+) -> dict[str, Any] | None:
+    """Select current schema-4 authority or its immutable last-authority fallback."""
+
+    if not isinstance(progress, dict) or progress.get("schema_version") != 4:
+        return None
+    if progress.get("union_authoritative") is True:
+        return progress
+    last_authority = progress.get("last_authority")
+    if (
+        isinstance(last_authority, dict)
+        and last_authority.get("schema_version") == 4
+        and last_authority.get("union_authoritative") is True
+    ):
+        return last_authority
+    return None
+
+
+def attach_active_scan_authority_descriptor(
+    active_scan: dict[str, Any],
+    authority_payload: dict[str, Any],
+    authority_descriptor: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind an authority asset to the status object that actually owns its seal."""
+
+    date_fallback = active_scan.get("date_fallback")
+    if not isinstance(date_fallback, dict):
+        raise RuntimeError("active authority asset has no date-scan status owner")
+    descriptor_owner = (
+        selected_cardinality_authority(date_fallback)
+        if date_fallback.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION
+        else date_fallback
+    )
+    if descriptor_owner is None:
+        raise RuntimeError("active authority asset has no status owner")
+    for key in ("cycle_id", "generation"):
+        if (
+            authority_payload.get(key) is not None
+            and descriptor_owner.get(key) != authority_payload.get(key)
+        ):
+            raise RuntimeError(f"active authority asset/status {key} mismatch")
+    descriptor_owner["evidence_asset"] = {
+        "schema_version": authority_payload["schema_version"],
+        "file": ACTIVE_SCAN_AUTHORITY_FILE,
+        "bytes": authority_descriptor["bytes"],
+        "sha256": authority_descriptor["sha256"],
+    }
+    return descriptor_owner
+
+
+def load_active_scan_authority(
+    database: Path,
+    active_scan: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Dispatch authority export without letting legacy schemas claim schema-4 seal."""
+
+    progress = active_scan.get("date_fallback")
+    if not isinstance(progress, dict):
+        return None
+    if progress.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION:
+        authority_progress = selected_cardinality_authority(progress)
+        return (
+            _load_cardinality_seal_authority(
+                database, active_scan, authority_progress
+            )
+            if authority_progress is not None
+            else None
+        )
+    return _load_hybrid_active_scan_authority(database, active_scan)
 
 
 def database_times(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -2785,25 +4012,20 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             role="active_scan_authority_evidence",
         )
         assets[ACTIVE_SCAN_AUTHORITY_FILE] = authority_descriptor
-        date_fallback = active_scan_status.get("date_fallback")
-        assert isinstance(date_fallback, dict)
-        date_fallback["evidence_asset"] = {
-            "schema_version": ACTIVE_SCAN_AUTHORITY_SCHEMA_VERSION,
-            "file": ACTIVE_SCAN_AUTHORITY_FILE,
-            "bytes": authority_descriptor["bytes"],
-            "sha256": authority_descriptor["sha256"],
-        }
+        attach_active_scan_authority_descriptor(
+            active_scan_status,
+            authority_payload,
+            authority_descriptor,
+        )
     elif authority_path.exists():
         authority_path.unlink()
 
     still_missing = dict(fetch_status.get("still_missing") or {})
     date_fallback = active_scan_status.get("date_fallback")
+    selected_authority = selected_cardinality_authority(date_fallback)
     active_scan_complete = bool(
-        active_scan_status.get("complete")
-        and (
-            not isinstance(date_fallback, dict)
-            or date_fallback.get("completion_authoritative") is True
-        )
+        selected_authority is not None
+        and selected_authority.get("completion_authoritative") is True
     )
     still_missing.update(
         {

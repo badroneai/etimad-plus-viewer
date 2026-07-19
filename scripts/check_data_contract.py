@@ -14,15 +14,20 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from export_warehouse import (
+    ACTIVE_CENSUS_TAXONOMY_ENDPOINTS,
     AWARDED_INDEX_PART_ALGORITHM,
     AWARDED_INDEX_PART_COUNT,
     AWARDED_INDEX_PART_FORMAT_VERSION,
+    CARDINALITY_SEAL_MODE,
+    CARDINALITY_SEAL_SCHEMA_VERSION,
+    CARDINALITY_SEAL_STRATEGY,
     OFFICIAL_REGION_LABELS,
     SCHEMA_VERSION,
     SHARD_COUNT,
     awarded_index_part_config,
     index_part_for_ref,
     parse_iso_datetime,
+    selected_cardinality_authority,
     shard_for_ref,
     to_halalas,
 )
@@ -255,18 +260,26 @@ def assert_active_scan_progress_contract(
     if date_fallback is not None:
         assert_active_date_scan_contract(date_fallback, evidence)
         assert isinstance(date_fallback, dict)
-        assert date_fallback["target_count"] == denominator, (
-            "active date scan target cohort differs from active_scan"
-        )
-        assert date_fallback["targets_observed_unique"] == scanned, (
-            "active date scan observed count differs from active_scan"
-        )
-        assert date_fallback["targets_resolved_unique"] == resolved, (
-            "active date scan resolved count differs from active_scan"
-        )
-        assert date_fallback["targets_absent_after_full_partitions"] == absent, (
-            "active date scan absence count differs from active_scan"
-        )
+        if date_fallback.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION:
+            targets = date_fallback.get("targets")
+            assert isinstance(targets, dict), "active census target status is missing"
+            assert targets.get("total") == denominator
+            assert targets.get("observed") == scanned
+            assert targets.get("resolved") == resolved
+            assert targets.get("absent") == absent
+        else:
+            assert date_fallback["target_count"] == denominator, (
+                "active date scan target cohort differs from active_scan"
+            )
+            assert date_fallback["targets_observed_unique"] == scanned, (
+                "active date scan observed count differs from active_scan"
+            )
+            assert date_fallback["targets_resolved_unique"] == resolved, (
+                "active date scan resolved count differs from active_scan"
+            )
+            assert date_fallback["targets_absent_after_full_partitions"] == absent, (
+                "active date scan absence count differs from active_scan"
+            )
         assert (
             isinstance(progress.get("cycle_id"), str)
             and progress["cycle_id"]
@@ -289,6 +302,21 @@ def assert_active_scan_progress_contract(
         )
     if denominator and remaining == 0 and not awaiting_date_authority:
         assert progress["complete"], "active_scan reached full coverage without completion"
+
+
+def assert_active_missing_truth(progress: object, still_missing: object) -> None:
+    """Only a schema-4 cardinality seal may clear the active-refresh gap."""
+
+    assert isinstance(still_missing, dict), "still_missing is invalid"
+    date_fallback = progress.get("date_fallback") if isinstance(progress, dict) else None
+    selected_authority = selected_cardinality_authority(date_fallback)
+    sealed = bool(
+        selected_authority is not None
+        and selected_authority.get("completion_authoritative") is True
+    )
+    assert ("active_refresh_sweep" not in still_missing) == sealed, (
+        "active_refresh_sweep still_missing disagrees with schema-4 authority"
+    )
 
 
 def _sha256(value: object, *, label: str) -> str:
@@ -765,6 +793,1155 @@ def _assert_active_generation_proof(
         "active generation proof closed_at is missing"
     )
     return proof["generation"], proof["convergence_ordinal"], proof_union_sha
+
+
+def _cardinality_bijection_sha256(mappings: dict[str, str]) -> str:
+    assert len(mappings) == len(set(mappings.values())), (
+        "active census mappings are not a ref/tender-id bijection"
+    )
+    payload = "".join(
+        f"{reference}\t{mappings[reference]}\n" for reference in sorted(mappings)
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _cardinality_taxonomy_sha256(
+    taxonomy: dict[str, list[dict[str, str]]],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            taxonomy,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _assert_cardinality_list_url(
+    value: object,
+    *,
+    page_number: int,
+    filters: dict[str, str],
+    label: str,
+) -> None:
+    actual = urlsplit(str(value or ""))
+    expected = urlsplit(ACTIVE_LIST_ENDPOINT)
+    assert (actual.scheme, actual.netloc, actual.path) == (
+        expected.scheme,
+        expected.netloc,
+        expected.path,
+    ), f"{label} endpoint mismatch"
+    query = parse_qs(actual.query, keep_blank_values=True)
+    expected_query = {
+        **ACTIVE_LIST_REQUIRED_PARAMS,
+        "PageSize": "24",
+        "PageNumber": str(page_number),
+        **filters,
+    }
+    assert not set(query) - set(expected_query) - {"_"}, (
+        f"{label} query has unexpected parameters"
+    )
+    for key, expected_value in expected_query.items():
+        assert query.get(key) == [expected_value], f"{label} query mismatch: {key}"
+
+
+def _cardinality_mapping_list(
+    value: object,
+    *,
+    label: str,
+) -> list[dict[str, str]]:
+    assert isinstance(value, list), f"{label} mappings are missing"
+    result: list[dict[str, str]] = []
+    for row in value:
+        assert isinstance(row, dict), f"{label} mapping row is invalid"
+        reference = row.get("reference_number")
+        tender_id = row.get("tender_id")
+        assert isinstance(reference, str) and reference, (
+            f"{label} mapping reference is invalid"
+        )
+        assert isinstance(tender_id, str) and tender_id, (
+            f"{label} mapping tender id is invalid"
+        )
+        result.append({"reference_number": reference, "tender_id": tender_id})
+    return result
+
+
+def _assert_cardinality_boundary_capture(
+    capture: object,
+    *,
+    expected_total: int,
+    expected_head_sha: str,
+    verification_by_path: dict[str, dict],
+    label: str,
+) -> tuple[set[str], str]:
+    assert isinstance(capture, dict), f"{label} capture is missing"
+    assert capture.get("status") == 200, f"{label} status is not 200"
+    assert not capture.get("content_type") or "json" in str(
+        capture.get("content_type")
+    ).lower(), (
+        f"{label} content type is invalid"
+    )
+    assert capture.get("total_count") == expected_total, f"{label} total drift"
+    references = capture.get("references")
+    assert isinstance(references, list) and all(
+        isinstance(reference, str) and reference for reference in references
+    ), f"{label} references are invalid"
+    assert len(references) == len(set(references)), f"{label} has duplicate references"
+    assert capture.get("records") == len(references), f"{label} record count mismatch"
+    assert len(references) == min(24, expected_total), f"{label} page cardinality mismatch"
+    head_sha = _reference_union_sha256(set(references))
+    assert head_sha == expected_head_sha, f"{label} head reference drift"
+    assert _sha256(capture.get("reference_sha256"), label=f"{label} reference") == head_sha, (
+        f"{label} reference hash mismatch"
+    )
+    assert _nonnegative_integer(capture.get("bytes")) and capture["bytes"] > 0, (
+        f"{label} byte count is invalid"
+    )
+    _assert_raw_verification_pointer(
+        verification_by_path,
+        capture.get("raw_path"),
+        capture.get("sha256"),
+        label=label,
+        expected_bytes=capture.get("bytes"),
+    )
+    _assert_cardinality_list_url(
+        capture.get("url"), page_number=1, filters={}, label=label
+    )
+    return set(references), str(capture["raw_path"])
+
+
+def _assert_cardinality_taxonomy(
+    taxonomy_evidence: object,
+    *,
+    verification_by_path: dict[str, dict],
+) -> tuple[dict[str, list[dict[str, str]]], str, set[str]]:
+    assert isinstance(taxonomy_evidence, dict), "active census taxonomy evidence is missing"
+    values = taxonomy_evidence.get("values")
+    captures = taxonomy_evidence.get("captures")
+    assert isinstance(values, dict), "active census taxonomy values are missing"
+    assert isinstance(captures, list), "active census taxonomy captures are missing"
+    expected_kinds = {"type", "area", "activity", "agency", "booklet"}
+    assert set(values) == expected_kinds, "active census taxonomy kinds are incomplete"
+    canonical: dict[str, list[dict[str, str]]] = {}
+    for kind, entries in values.items():
+        assert isinstance(entries, list), f"active census taxonomy {kind} is invalid"
+        normalised: list[dict[str, str]] = []
+        seen_values: set[str] = set()
+        for entry in entries:
+            assert isinstance(entry, dict), f"active census taxonomy {kind} row is invalid"
+            value = entry.get("value")
+            label = entry.get("label")
+            assert isinstance(value, str) and value and value not in seen_values, (
+                f"active census taxonomy {kind} value is blank or duplicated"
+            )
+            assert isinstance(label, str) and label, (
+                f"active census taxonomy {kind} label is blank"
+            )
+            seen_values.add(value)
+            normalised.append({"value": value, "label": label})
+        assert normalised == sorted(normalised, key=lambda row: row["value"]), (
+            f"active census taxonomy {kind} is not sorted"
+        )
+        canonical[kind] = normalised
+    assert canonical["booklet"] == [
+        {"value": str(value), "label": str(value)} for value in range(7)
+    ], "active census booklet taxonomy differs from fixed 0..6"
+    taxonomy_sha = _cardinality_taxonomy_sha256(canonical)
+    assert _sha256(
+        taxonomy_evidence.get("sha256"), label="active census taxonomy"
+    ) == taxonomy_sha, "active census taxonomy hash mismatch"
+
+    captures_by_kind: dict[str, dict] = {}
+    raw_paths: set[str] = set()
+    for capture in captures:
+        assert isinstance(capture, dict), "active census taxonomy capture is invalid"
+        kind = capture.get("kind")
+        assert kind in ACTIVE_CENSUS_TAXONOMY_ENDPOINTS and kind not in captures_by_kind, (
+            "active census taxonomy capture kind is invalid or duplicated"
+        )
+        captures_by_kind[str(kind)] = capture
+        endpoint_path = ACTIVE_CENSUS_TAXONOMY_ENDPOINTS[str(kind)]
+        declared_endpoint = urlsplit(str(capture.get("endpoint") or ""))
+        declared_path = (
+            declared_endpoint.path
+            if declared_endpoint.scheme
+            else str(capture.get("endpoint") or "")
+        )
+        assert declared_path == endpoint_path, (
+            f"active census taxonomy endpoint mismatch: {kind}"
+        )
+        actual = urlsplit(str(capture.get("url") or ""))
+        assert actual.scheme == "https" and actual.netloc == "tenders.etimad.sa", (
+            f"active census taxonomy host mismatch: {kind}"
+        )
+        assert actual.path == endpoint_path, f"active census taxonomy URL mismatch: {kind}"
+        assert not set(parse_qs(actual.query, keep_blank_values=True)) - {"_"}, (
+            f"active census taxonomy query mismatch: {kind}"
+        )
+        assert capture.get("status") == 200, f"active census taxonomy status: {kind}"
+        assert not capture.get("content_type") or "json" in str(
+            capture.get("content_type")
+        ).lower(), (
+            f"active census taxonomy content type: {kind}"
+        )
+        assert capture.get("values") == canonical[str(kind)], (
+            f"active census taxonomy capture/value mismatch: {kind}"
+        )
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            capture.get("raw_path"),
+            capture.get("sha256"),
+            label=f"active census taxonomy {kind}",
+            expected_bytes=capture.get("bytes"),
+        )
+        raw_paths.add(str(capture["raw_path"]))
+    assert set(captures_by_kind) == set(ACTIVE_CENSUS_TAXONOMY_ENDPOINTS), (
+        "active census taxonomy RAW captures are incomplete"
+    )
+    return canonical, taxonomy_sha, raw_paths
+
+
+def _assert_cardinality_page(
+    page: object,
+    *,
+    filters: dict[str, str],
+    verification_by_path: dict[str, dict],
+    label: str,
+) -> tuple[list[dict[str, str]], str]:
+    assert isinstance(page, dict), f"{label} page is invalid"
+    page_number = page.get("page_number")
+    assert (
+        isinstance(page_number, int)
+        and not isinstance(page_number, bool)
+        and 1 <= page_number <= 2
+    ), (
+        f"{label} page number exceeds the cardinality ceiling"
+    )
+    total_count = page.get("total_count")
+    records = page.get("records")
+    assert _nonnegative_integer(total_count), f"{label} total count is invalid"
+    assert _nonnegative_integer(records), f"{label} record count is invalid"
+    references = page.get("references")
+    assert isinstance(references, list) and all(
+        isinstance(reference, str) and reference for reference in references
+    ), f"{label} references are invalid"
+    assert records == len(references), f"{label} record/reference count mismatch"
+    assert len(references) == len(set(references)), f"{label} duplicate within page"
+    mappings = _cardinality_mapping_list(page.get("mappings"), label=label)
+    assert [row["reference_number"] for row in mappings] == references, (
+        f"{label} mapping/reference order mismatch"
+    )
+    assert len({row["tender_id"] for row in mappings}) == len(mappings), (
+        f"{label} duplicate tender id within page"
+    )
+    _assert_raw_verification_pointer(
+        verification_by_path,
+        page.get("raw_path"),
+        page.get("sha256"),
+        label=label,
+    )
+    _assert_cardinality_list_url(
+        page.get("url"), page_number=page_number, filters=filters, label=label
+    )
+    return mappings, str(page["raw_path"])
+
+
+def _assert_cardinality_nodes(
+    node_evidence: object,
+    *,
+    taxonomy: dict[str, list[dict[str, str]]],
+    verification_by_path: dict[str, dict],
+    exact_only: bool,
+    label: str,
+    generation: int,
+    boundary_total: int,
+    union_sha256: str,
+) -> tuple[dict[str, str], int, int, set[str], dict[str, int]]:
+    assert isinstance(node_evidence, dict), f"{label} node evidence is missing"
+    nodes = node_evidence.get("nodes")
+    pages = node_evidence.get("pages")
+    assert isinstance(nodes, list) and isinstance(pages, list), (
+        f"{label} node/page evidence is incomplete"
+    )
+    lens_order = (
+        ("type", "TenderTypeId"),
+        ("area", "TenderAreasIdString"),
+        ("booklet", "ConditionaBookletRange"),
+        ("activity", "TenderActivityId"),
+        ("agency", "AgencyCode"),
+    )
+    values_by_filter = {
+        filter_key: {row["value"] for row in taxonomy[kind]}
+        for kind, filter_key in lens_order
+    }
+    nodes_by_id: dict[str, dict] = {}
+    state_counts: dict[str, int] = {}
+    for node in nodes:
+        assert isinstance(node, dict), f"{label} node is invalid"
+        node_id = node.get("node_id")
+        assert isinstance(node_id, str) and node_id and node_id not in nodes_by_id, (
+            f"{label} node id is missing or duplicated"
+        )
+        depth = node.get("depth")
+        assert (
+            isinstance(depth, int)
+            and not isinstance(depth, bool)
+            and 0 <= depth <= len(lens_order)
+        ), (
+            f"{label} node depth is invalid"
+        )
+        filters = node.get("filters")
+        assert isinstance(filters, dict), f"{label} node filters are invalid"
+        assert list(filters) == [key for _, key in lens_order[:depth]], (
+            f"{label} filter hierarchy has a gap"
+        )
+        for key, raw_value in filters.items():
+            assert isinstance(raw_value, str) and raw_value in values_by_filter[key], (
+                f"{label} filter value is outside taxonomy: {key}"
+            )
+        expected_lens = lens_order[depth - 1][0] if depth else "root"
+        assert node.get("lens_name") == expected_lens, f"{label} lens/depth mismatch"
+        state = node.get("state")
+        allowed_states = {
+            "pending",
+            "split",
+            "exact",
+            "blocked",
+            "error",
+            "superseded_by_cardinality",
+        }
+        assert state in allowed_states, f"{label} node state is invalid"
+        if exact_only:
+            assert state == "exact", f"{label} proof contains a non-exact node"
+        supersession = node.get("supersession")
+        assert isinstance(supersession, dict) and set(supersession) == {
+            "reason",
+            "union_sha256",
+            "generation",
+            "boundary_total_count",
+        }, f"{label} node supersession binding is missing"
+        if state == "superseded_by_cardinality":
+            assert (
+                supersession.get("reason")
+                == "union_reached_boundary_cardinality"
+            ), f"{label} node supersession reason mismatch"
+            assert supersession.get("union_sha256") == union_sha256, (
+                f"{label} node supersession union binding mismatch"
+            )
+            assert supersession.get("generation") == generation, (
+                f"{label} node supersession generation binding mismatch"
+            )
+            assert supersession.get("boundary_total_count") == boundary_total, (
+                f"{label} node supersession boundary binding mismatch"
+            )
+        else:
+            assert all(value is None for value in supersession.values()), (
+                f"{label} non-superseded node carries a supersession binding"
+            )
+        state_counts[str(state)] = state_counts.get(str(state), 0) + 1
+        nodes_by_id[node_id] = node
+
+    if not exact_only:
+        roots = [
+            node
+            for node in nodes_by_id.values()
+            if node.get("parent_node_id") is None
+        ]
+        assert len(roots) == 1 and roots[0].get("depth") == 0, (
+            f"{label} frontier must have exactly one root"
+        )
+        for node in nodes_by_id.values():
+            parent_id = node.get("parent_node_id")
+            if parent_id is None:
+                continue
+            parent = nodes_by_id.get(str(parent_id))
+            assert isinstance(parent, dict), f"{label} frontier parent is missing"
+            assert node["depth"] == parent["depth"] + 1, (
+                f"{label} frontier depth gap"
+            )
+            assert list(node["filters"].items())[:-1] == list(parent["filters"].items()), (
+                f"{label} child does not inherit parent filters"
+            )
+
+    pages_by_node: dict[str, list[dict]] = {}
+    for page in pages:
+        assert isinstance(page, dict), f"{label} page row is invalid"
+        node_id = str(page.get("node_id") or "")
+        assert node_id in nodes_by_id, f"{label} page has no node"
+        pages_by_node.setdefault(node_id, []).append(page)
+
+    membership: dict[str, str] = {}
+    tender_to_ref: dict[str, str] = {}
+    duplicate_occurrences = 0
+    duplicate_tender_occurrences = 0
+    raw_paths: set[str] = set()
+    for node_id, node in nodes_by_id.items():
+        node_pages = sorted(
+            pages_by_node.get(node_id, []), key=lambda row: row.get("page_number", 0)
+        )
+        page_numbers: list[int] = []
+        for page_row in node_pages:
+            page_number = page_row.get("page_number")
+            assert (
+                isinstance(page_number, int)
+                and not isinstance(page_number, bool)
+                and page_number >= 1
+            ), f"{label} node page number is invalid"
+            page_numbers.append(page_number)
+        if node["state"] == "exact":
+            total = node.get("total_count")
+            page_count = node.get("page_count")
+            assert isinstance(total, int) and not isinstance(total, bool) and total >= 0, (
+                f"{label} exact node total is invalid"
+            )
+            assert (
+                isinstance(page_count, int)
+                and not isinstance(page_count, bool)
+                and page_count >= 0
+            ), f"{label} exact node pages invalid"
+            expected_pages = max(1, (total + 23) // 24)
+            assert expected_pages <= 2, f"{label} exact node exceeds two-page ceiling"
+            assert page_count == expected_pages, f"{label} exact node page count mismatch"
+            assert page_numbers == list(range(1, expected_pages + 1)), (
+                f"{label} exact node has a page gap"
+            )
+        elif page_numbers:
+            assert page_numbers == sorted(set(page_numbers)), (
+                f"{label} non-exact node page ledger is duplicated or unsorted"
+            )
+        node_seen: set[str] = set()
+        for page in node_pages:
+            mappings, raw_path = _assert_cardinality_page(
+                page,
+                filters={str(key): str(value) for key, value in node["filters"].items()},
+                verification_by_path=verification_by_path,
+                label=f"{label} page {node_id}:{page.get('page_number')}",
+            )
+            raw_paths.add(raw_path)
+            if node["state"] == "exact":
+                assert page.get("total_count") == node.get("total_count"), (
+                    f"{label} exact page/node total mismatch"
+                )
+                expected_records = min(
+                    24,
+                    max(
+                        0,
+                        int(node["total_count"])
+                        - 24 * (int(page["page_number"]) - 1),
+                    ),
+                )
+                assert page.get("records") == expected_records, (
+                    f"{label} exact page overcount or undercount"
+                )
+            for mapping in mappings:
+                reference = mapping["reference_number"]
+                tender_id = mapping["tender_id"]
+                assert reference not in node_seen, f"{label} duplicate across node pages"
+                node_seen.add(reference)
+                existing = membership.get(reference)
+                if existing is not None:
+                    assert existing == tender_id, f"{label} reference maps to two tender ids"
+                    duplicate_occurrences += 1
+                    duplicate_tender_occurrences += 1
+                    continue
+                existing_ref = tender_to_ref.get(tender_id)
+                assert existing_ref is None, f"{label} tender id maps to two references"
+                membership[reference] = tender_id
+                tender_to_ref[tender_id] = reference
+        if node["state"] == "exact":
+            assert len(node_seen) == node["total_count"], (
+                f"{label} exact leaf union cardinality mismatch"
+            )
+    return (
+        membership,
+        duplicate_occurrences,
+        duplicate_tender_occurrences,
+        raw_paths,
+        state_counts,
+    )
+
+
+def _assert_cardinality_candidates(
+    evidence: object,
+    *,
+    verification_by_path: dict[str, dict],
+    label: str,
+    cycle_id: str,
+    generation: int,
+) -> tuple[dict[str, str], int, set[str], list[str]]:
+    if isinstance(evidence, dict):
+        checks = evidence.get("checks")
+        superseded_rows = evidence.get("superseded")
+        assert isinstance(superseded_rows, list), (
+            f"{label} superseded candidate evidence is missing"
+        )
+        checks = (
+            sorted(
+                [*checks, *superseded_rows],
+                key=lambda row: str(row.get("reference_number") or "")
+                if isinstance(row, dict)
+                else "",
+            )
+            if isinstance(checks, list)
+            else checks
+        )
+    else:
+        checks = evidence
+    assert isinstance(checks, list), f"{label} candidate evidence is missing"
+    included: dict[str, str] = {}
+    tender_ids: set[str] = set()
+    pending = 0
+    superseded: list[str] = []
+    raw_paths: set[str] = set()
+    previous_ref: str | None = None
+    for check_row in checks:
+        assert isinstance(check_row, dict), f"{label} candidate row is invalid"
+        reference = check_row.get("reference_number")
+        assert isinstance(reference, str) and reference.isdigit(), (
+            f"{label} candidate reference is invalid"
+        )
+        assert previous_ref is None or previous_ref < reference, (
+            f"{label} candidates are duplicate or unsorted"
+        )
+        previous_ref = reference
+        state = check_row.get("state")
+        assert state in {
+            "included",
+            "verified_active",
+            "excluded",
+            "verified_nonactive",
+            "pending",
+            "error",
+            "superseded_by_cardinality",
+        }, f"{label} candidate state is invalid"
+        raw_path = check_row.get("raw_path")
+        if state == "superseded_by_cardinality":
+            assert check_row.get("cycle_id") == cycle_id, (
+                f"{label} superseded candidate cycle binding mismatch"
+            )
+            assert check_row.get("generation") == generation, (
+                f"{label} superseded candidate generation binding mismatch"
+            )
+            assert check_row.get("error") == "union_reached_boundary_cardinality", (
+                f"{label} superseded candidate reason mismatch"
+            )
+            for key in ("status_id", "tender_id", "raw_path", "sha256", "url"):
+                assert check_row.get(key) is None, (
+                    f"{label} superseded candidate fabricated {key} evidence"
+                )
+            superseded.append(reference)
+            continue
+        if state in {"pending", "error"}:
+            pending += 1
+            if raw_path in (None, ""):
+                continue
+        _assert_raw_verification_pointer(
+            verification_by_path,
+            raw_path,
+            check_row.get("sha256"),
+            label=f"{label} candidate {reference}",
+        )
+        raw_paths.add(str(raw_path))
+        _assert_cardinality_list_url(
+            check_row.get("url"),
+            page_number=1,
+            filters={"ReferenceNumber": reference},
+            label=f"{label} candidate {reference}",
+        )
+        if state in {"included", "verified_active"}:
+            assert check_row.get("status_id") == 4, (
+                f"{label} included candidate is not status 4"
+            )
+            tender_id = check_row.get("tender_id")
+            assert isinstance(tender_id, str) and tender_id, (
+                f"{label} included candidate tender id is missing"
+            )
+            assert reference not in included and tender_id not in tender_ids, (
+                f"{label} included candidate mapping is duplicated"
+            )
+            included[reference] = tender_id
+            tender_ids.add(tender_id)
+        elif state in {"excluded", "verified_nonactive"}:
+            status_id = check_row.get("status_id")
+            assert status_id is None or (
+                isinstance(status_id, int)
+                and not isinstance(status_id, bool)
+                and status_id != 4
+            ), f"{label} excluded candidate still claims status 4"
+    if isinstance(evidence, dict):
+        assert evidence.get("superseded_by_cardinality_count") == len(superseded), (
+            f"{label} superseded candidate count mismatch"
+        )
+        assert evidence.get("superseded_reference_sha256") == (
+            _reference_union_sha256(set(superseded))
+        ), f"{label} superseded candidate hash mismatch"
+    return included, pending, raw_paths, superseded
+
+
+def assert_active_cardinality_scan_contract(
+    progress: dict,
+    evidence: object,
+) -> None:
+    """Replay schema-4 cardinality seal from independently checksummed evidence."""
+
+    assert_active_cardinality_progress_summary(progress)
+    assert progress.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION
+    assert progress.get("strategy") == CARDINALITY_SEAL_STRATEGY, (
+        "schema-4 active census strategy mismatch"
+    )
+    assert progress.get("mode") == CARDINALITY_SEAL_MODE, (
+        "schema-4 active census mode mismatch"
+    )
+    assert isinstance(evidence, dict), "schema-4 active census evidence is missing"
+    for key in ("schema_version", "strategy", "mode", "cycle_id", "generation"):
+        assert evidence.get(key) == progress.get(key), (
+            f"schema-4 active census evidence mismatch: {key}"
+        )
+    generation = progress.get("generation")
+    assert isinstance(generation, int) and not isinstance(generation, bool) and generation >= 1
+
+    raw_verification = evidence.get("raw_verification")
+    assert isinstance(raw_verification, dict), "active census RAW verification is missing"
+    assert raw_verification.get("mode") == "export_time_official_warehouse_bytes"
+    raw_files = raw_verification.get("files")
+    assert isinstance(raw_files, list), "active census RAW verification files are missing"
+    verification_by_path: dict[str, dict] = {}
+    for descriptor in raw_files:
+        assert isinstance(descriptor, dict), "active census RAW descriptor is invalid"
+        raw_path = descriptor.get("raw_path")
+        assert isinstance(raw_path, str) and raw_path, "active census RAW path is missing"
+        path = Path(raw_path)
+        assert not path.is_absolute() and ".." not in path.parts, (
+            "active census RAW path is unsafe"
+        )
+        assert raw_path not in verification_by_path, "active census RAW path is duplicated"
+        _sha256(descriptor.get("sha256"), label="active census RAW")
+        assert _nonnegative_integer(descriptor.get("bytes")), (
+            "active census RAW byte count is invalid"
+        )
+        verification_by_path[raw_path] = descriptor
+    assert list(verification_by_path) == sorted(verification_by_path), (
+        "active census RAW verification is not sorted"
+    )
+    assert raw_verification.get("verified_files") == len(raw_files)
+    assert raw_verification.get("verified_bytes") == sum(
+        row["bytes"] for row in raw_files
+    )
+
+    taxonomy, taxonomy_sha, referenced_paths = _assert_cardinality_taxonomy(
+        evidence.get("taxonomy"), verification_by_path=verification_by_path
+    )
+    boundary_status = progress.get("boundary")
+    boundary_evidence = evidence.get("boundary")
+    assert isinstance(boundary_status, dict), "active census boundary status is missing"
+    assert isinstance(boundary_evidence, dict), "active census boundary evidence is missing"
+    boundary_total = boundary_status.get("total_count")
+    assert (
+        isinstance(boundary_total, int)
+        and not isinstance(boundary_total, bool)
+        and boundary_total >= 0
+    ), "active census boundary total is invalid"
+    boundary_head = _sha256(
+        boundary_status.get("head_ref_sha256"), label="active census boundary head"
+    )
+    opening_refs, opening_path = _assert_cardinality_boundary_capture(
+        boundary_evidence.get("opening"),
+        expected_total=boundary_total,
+        expected_head_sha=boundary_head,
+        verification_by_path=verification_by_path,
+        label="active census opening boundary",
+    )
+    referenced_paths.add(opening_path)
+    closing_capture = boundary_evidence.get("closing")
+    closing_stable = False
+    if closing_capture is not None:
+        closing_refs, closing_path = _assert_cardinality_boundary_capture(
+            closing_capture,
+            expected_total=boundary_total,
+            expected_head_sha=boundary_head,
+            verification_by_path=verification_by_path,
+            label="active census closing boundary",
+        )
+        referenced_paths.add(closing_path)
+        closing_stable = opening_refs == closing_refs
+    assert boundary_status.get("opening_evidence") == boundary_evidence.get("opening")
+    assert boundary_status.get("closing_evidence") == closing_capture
+    assert boundary_status.get("stable") == closing_stable, (
+        "active census boundary stability mismatch"
+    )
+    membership_status = progress.get("membership")
+    assert isinstance(membership_status, dict), "active census membership status missing"
+    declared_union_sha = _sha256(
+        membership_status.get("union_sha256"),
+        label="active census declared membership union",
+    )
+
+    frontier = evidence.get("frontier")
+    (
+        current_mappings,
+        duplicate_occurrences,
+        duplicate_tender_occurrences,
+        current_paths,
+        state_counts,
+    ) = (
+        _assert_cardinality_nodes(
+            frontier,
+            taxonomy=taxonomy,
+            verification_by_path=verification_by_path,
+            exact_only=False,
+            label="active census current frontier",
+            generation=generation,
+            boundary_total=boundary_total,
+            union_sha256=declared_union_sha,
+        )
+    )
+    referenced_paths.update(current_paths)
+    candidate_mappings, pending_candidates, candidate_paths, _ = (
+        _assert_cardinality_candidates(
+            evidence.get("candidates"),
+            verification_by_path=verification_by_path,
+            label="active census current",
+            cycle_id=str(progress["cycle_id"]),
+            generation=generation,
+        )
+    )
+    referenced_paths.update(candidate_paths)
+    tender_to_ref = {tender_id: ref for ref, tender_id in current_mappings.items()}
+    for reference, tender_id in candidate_mappings.items():
+        existing = current_mappings.get(reference)
+        assert existing is None or existing == tender_id, (
+            "active census candidate reference mapping conflicts with a facet page"
+        )
+        existing_ref = tender_to_ref.get(tender_id)
+        assert existing_ref is None or existing_ref == reference, (
+            "active census candidate tender id maps to a second reference"
+        )
+        current_mappings[reference] = tender_id
+        tender_to_ref[tender_id] = reference
+
+    membership_evidence = evidence.get("membership")
+    assert isinstance(membership_evidence, dict), "active census membership evidence missing"
+    current_refs = sorted(current_mappings)
+    assert membership_evidence.get("references") == current_refs, (
+        "active census membership references differ from RAW replay"
+    )
+    expected_mapping_rows = [
+        {"reference_number": ref, "tender_id": current_mappings[ref]}
+        for ref in current_refs
+    ]
+    assert membership_evidence.get("mappings") == expected_mapping_rows, (
+        "active census membership mapping differs from RAW replay"
+    )
+    union_sha = _reference_union_sha256(set(current_refs))
+    bijection_sha = _cardinality_bijection_sha256(current_mappings)
+    assert membership_evidence.get("union_sha256") == union_sha
+    assert membership_evidence.get("bijection_sha256") == bijection_sha
+    integrity_errors = membership_status.get("integrity_errors")
+    assert isinstance(integrity_errors, list), "active census integrity errors are missing"
+    unexplained = max(0, boundary_total - len(current_refs))
+    assert membership_status.get("observed_unique") == len(current_refs)
+    assert membership_status.get("unexplained_unique") == unexplained
+    assert membership_status.get("pending_candidates") == pending_candidates
+    assert membership_status.get("union_sha256") == union_sha
+    assert membership_status.get("bijection_sha256") == bijection_sha
+    assert membership_status.get("duplicate_references") == duplicate_occurrences
+    assert membership_status.get("duplicate_tender_ids") == duplicate_tender_occurrences
+    assert membership_status.get("integrity_error_count") == len(integrity_errors)
+    membership_reported_complete = bool(
+        len(current_refs) == boundary_total
+        and unexplained == 0
+        and not integrity_errors
+    )
+    assert membership_status.get("complete") == membership_reported_complete
+    membership_sealed = bool(membership_reported_complete and pending_candidates == 0)
+
+    taxonomy_status = progress.get("taxonomy")
+    assert isinstance(taxonomy_status, dict), "active census taxonomy status is missing"
+    assert taxonomy_status.get("complete") is True
+    assert taxonomy_status.get("sha256") == taxonomy_sha
+    assert taxonomy_status.get("kinds") == {
+        kind: len(values) for kind, values in taxonomy.items()
+    }
+    frontier_status = progress.get("frontier")
+    assert isinstance(frontier_status, dict), "active census frontier status is missing"
+    assert isinstance(frontier, dict), "active census current frontier is missing"
+    nodes = frontier.get("nodes")
+    pages = frontier.get("pages")
+    assert isinstance(nodes, list) and isinstance(pages, list), (
+        "active census current frontier node/page ledger is missing"
+    )
+    assert frontier_status.get("nodes_total") == len(nodes)
+    for status_key, node_state in (
+        ("pending", "pending"),
+        ("split", "split"),
+        ("exact", "exact"),
+        ("blocked", "blocked"),
+        ("superseded_by_cardinality", "superseded_by_cardinality"),
+    ):
+        assert frontier_status.get(status_key) == state_counts.get(node_state, 0)
+    assert frontier_status.get("accepted_pages") == len(pages)
+    assert frontier_status.get("clear_for_authority") == (
+        not any(state_counts.get(state, 0) for state in ("pending", "blocked"))
+    ), "active census frontier clear-for-authority mismatch"
+
+    proofs = evidence.get("generation_proofs")
+    proof_status = progress.get("generation_proofs")
+    assert isinstance(proofs, list), "active census generation proofs are missing"
+    assert isinstance(proof_status, dict), "active census proof status is missing"
+    proof_generations: list[int] = []
+    proof_ordinals: list[int] = []
+    proof_chains: list[int] = []
+    proof_run_ids: list[str] = []
+    proof_paths_by_generation: list[set[str]] = []
+    matching: list[tuple[int, int]] = []
+    for proof in proofs:
+        assert isinstance(proof, dict), "active census proof row is invalid"
+        proof_generation = proof.get("generation")
+        proof_ordinal = proof.get("convergence_ordinal")
+        proof_chain = proof.get("chain_number")
+        assert isinstance(proof_generation, int) and proof_generation >= 1
+        assert isinstance(proof_ordinal, int) and proof_ordinal >= 1
+        assert isinstance(proof_chain, int) and not isinstance(proof_chain, bool)
+        assert proof_chain >= 1, "active census proof chain is invalid"
+        assert proof.get("superseded_at") is None, (
+            "active census active proof is marked superseded"
+        )
+        assert proof.get("superseded_reason") is None, (
+            "active census active proof has a supersession reason"
+        )
+        proof_run_id = proof.get("run_id")
+        assert isinstance(proof_run_id, str) and proof_run_id, (
+            "active census proof run id is missing"
+        )
+        assert proof.get("taxonomy_sha256") == taxonomy_sha
+        proof_boundary_total = proof.get("boundary_total_count")
+        assert (
+            isinstance(proof_boundary_total, int)
+            and not isinstance(proof_boundary_total, bool)
+            and proof_boundary_total >= 0
+        ), "active census proof boundary total is invalid"
+        proof_boundary_head = proof.get("boundary_head_ref_sha256")
+        assert isinstance(proof_boundary_head, str), (
+            "active census proof boundary head is invalid"
+        )
+        proof_boundary = proof.get("boundary_evidence")
+        assert isinstance(proof_boundary, dict), "active census proof boundary missing"
+        proof_paths: set[str] = set()
+        proof_open_refs, proof_open_path = _assert_cardinality_boundary_capture(
+            proof_boundary.get("opening"),
+            expected_total=proof_boundary_total,
+            expected_head_sha=proof_boundary_head,
+            verification_by_path=verification_by_path,
+            label=f"active census proof {proof_generation} opening",
+        )
+        proof_close_refs, proof_close_path = _assert_cardinality_boundary_capture(
+            proof_boundary.get("closing"),
+            expected_total=proof_boundary_total,
+            expected_head_sha=proof_boundary_head,
+            verification_by_path=verification_by_path,
+            label=f"active census proof {proof_generation} closing",
+        )
+        assert proof_open_refs == proof_close_refs, "active census proof boundary drift"
+        proof_paths.update((proof_open_path, proof_close_path))
+        proof_mapping, _, _, node_paths, _ = _assert_cardinality_nodes(
+            proof.get("node_evidence"),
+            taxonomy=taxonomy,
+            verification_by_path=verification_by_path,
+            exact_only=False,
+            label=f"active census proof {proof_generation}",
+            generation=proof_generation,
+            boundary_total=proof_boundary_total,
+            union_sha256=_sha256(
+                proof.get("union_sha256"),
+                label=f"active census proof {proof_generation} union",
+            ),
+        )
+        proof_paths.update(node_paths)
+        proof_candidates, proof_pending, proof_candidate_paths, _ = (
+            _assert_cardinality_candidates(
+                proof.get("candidate_evidence"),
+                verification_by_path=verification_by_path,
+                label=f"active census proof {proof_generation}",
+                cycle_id=str(progress["cycle_id"]),
+                generation=proof_generation,
+            )
+        )
+        assert proof_pending == 0, "active census proof has a pending candidate"
+        proof_paths.update(proof_candidate_paths)
+        proof_tender_ids = {value: key for key, value in proof_mapping.items()}
+        for reference, tender_id in proof_candidates.items():
+            known_id = proof_mapping.get(reference)
+            known_ref = proof_tender_ids.get(tender_id)
+            assert known_id is None or known_id == tender_id, (
+                "active census proof candidate reference mapping conflicts"
+            )
+            assert known_ref is None or known_ref == reference, (
+                "active census proof candidate tender-id mapping conflicts"
+            )
+            proof_mapping[reference] = tender_id
+            proof_tender_ids[tender_id] = reference
+        proof_refs = sorted(proof_mapping)
+        assert proof.get("references") == proof_refs, (
+            "active census proof references differ from RAW replay"
+        )
+        assert proof.get("mappings") == [
+            {"reference_number": ref, "tender_id": proof_mapping[ref]}
+            for ref in proof_refs
+        ], "active census proof mappings differ from RAW replay"
+        proof_union_sha = _reference_union_sha256(set(proof_refs))
+        proof_bijection_sha = _cardinality_bijection_sha256(proof_mapping)
+        assert proof.get("union_unique") == len(proof_refs)
+        assert proof.get("union_unique") == proof.get("boundary_total_count"), (
+            "active census proof union does not equal N"
+        )
+        assert proof.get("union_sha256") == proof_union_sha
+        assert proof.get("bijection_sha256") == proof_bijection_sha
+        proof_generations.append(proof_generation)
+        proof_ordinals.append(proof_ordinal)
+        proof_chains.append(proof_chain)
+        proof_run_ids.append(proof_run_id)
+        proof_paths_by_generation.append(proof_paths)
+        referenced_paths.update(proof_paths)
+        if (
+            proof.get("boundary_total_count") == boundary_total
+            and proof.get("boundary_head_ref_sha256") == boundary_head
+            and proof_union_sha == union_sha
+            and proof_bijection_sha == bijection_sha
+        ):
+            matching.append((proof_generation, proof_ordinal))
+
+    expected_generations = [generation - 1, generation]
+    assert len(proofs) == 2, "active census authority requires exactly two proofs"
+    assert proof_generations == expected_generations, (
+        "active census authority proofs are not adjacent generations ending current"
+    )
+    assert proof_ordinals == [1, 2], (
+        "active census authority proof ordinals must be exactly [1, 2]"
+    )
+    chain_number = proof_status.get("chain_number")
+    assert isinstance(chain_number, int) and not isinstance(chain_number, bool)
+    assert chain_number >= 1, "active census proof status chain is invalid"
+    assert proof_chains == [chain_number, chain_number], (
+        "active census authority proofs are interleaved across proof chains"
+    )
+    assert len(set(proof_run_ids)) == 2, (
+        "active census authority proofs reuse a run id"
+    )
+    for index, proof_paths in enumerate(proof_paths_by_generation):
+        for earlier_paths in proof_paths_by_generation[:index]:
+            assert proof_paths.isdisjoint(earlier_paths), (
+                "active census proof generations reuse RAW paths"
+            )
+    matching_generations = [item[0] for item in matching]
+    matching_ordinals = [item[1] for item in matching]
+    proof_authoritative = bool(
+        matching_generations == expected_generations
+        and matching_ordinals == [1, 2]
+    )
+    ledger = evidence.get("generation_proof_ledger")
+    assert isinstance(ledger, list), "active census generation proof ledger is missing"
+    active_ledger: list[dict] = []
+    superseded_count = 0
+    ledger_order: list[tuple[int, int, int]] = []
+    for row in ledger:
+        assert isinstance(row, dict), "active census proof ledger row is invalid"
+        row_generation = row.get("generation")
+        row_ordinal = row.get("convergence_ordinal")
+        row_chain = row.get("chain_number")
+        assert isinstance(row_generation, int) and row_generation >= 1
+        assert isinstance(row_ordinal, int) and row_ordinal >= 1
+        assert isinstance(row_chain, int) and row_chain >= 1
+        ledger_order.append((row_chain, row_ordinal, row_generation))
+        superseded_at = row.get("superseded_at")
+        superseded_reason = row.get("superseded_reason")
+        if superseded_at is None:
+            assert superseded_reason is None, (
+                "active census unsuperseded proof has a supersession reason"
+            )
+            assert row_chain == chain_number, (
+                "active census unsuperseded proof belongs to a stale chain"
+            )
+            active_ledger.append(row)
+        else:
+            assert isinstance(superseded_at, str) and superseded_at
+            assert isinstance(superseded_reason, str) and superseded_reason
+            assert row_chain < chain_number, (
+                "active census superseded proof is not from an older chain"
+            )
+            superseded_count += 1
+    assert ledger_order == sorted(ledger_order), (
+        "active census proof ledger is not in canonical order"
+    )
+    assert [
+        (
+            row.get("generation"),
+            row.get("convergence_ordinal"),
+            row.get("chain_number"),
+        )
+        for row in active_ledger
+    ] == list(zip(proof_generations, proof_ordinals, proof_chains)), (
+        "active census proof ledger disagrees with active proof payloads"
+    )
+    assert proof_status.get("required") == 2
+    assert proof_status.get("recorded") == len(proofs)
+    assert proof_status.get("recorded_total") == len(ledger)
+    assert proof_status.get("superseded") == superseded_count
+    assert proof_status.get("matching_current_union") == len(matching)
+    assert proof_status.get("distinct_generations") == len(set(matching_generations))
+    assert proof_status.get("generations") == matching_generations
+    assert proof_status.get("ordinals") == matching_ordinals
+    assert proof_status.get("authoritative") == proof_authoritative
+
+    frontier_clear = not any(
+        state_counts.get(state, 0) for state in ("pending", "blocked", "error")
+    )
+    authoritative = bool(
+        progress.get("phase") == "authoritative"
+        and evidence.get("phase") == "authoritative"
+        and boundary_status.get("stable")
+        and membership_sealed
+        and frontier_clear
+        and proof_authoritative
+    )
+    for key in (
+        "union_authoritative",
+        "partition_authoritative",
+        "absence_authoritative",
+        "complete",
+    ):
+        assert progress.get(key) == authoritative, f"active census {key} mismatch"
+        assert evidence.get(key) == authoritative, f"active census evidence {key} mismatch"
+    targets = progress.get("targets")
+    assert isinstance(targets, dict), "active census target status is missing"
+    for key in ("total", "observed", "absent", "resolved"):
+        assert _nonnegative_integer(targets.get(key)), (
+            f"active census target {key} is invalid"
+        )
+    assert targets["resolved"] == targets["observed"] + targets["absent"]
+    assert targets["resolved"] <= targets["total"]
+    completion_authoritative = bool(
+        authoritative and targets["resolved"] == targets["total"]
+    )
+    assert progress.get("completion_authoritative") == completion_authoritative
+    assert evidence.get("completion_authoritative") == completion_authoritative
+    assert set(verification_by_path) == referenced_paths, (
+        "active census RAW verification has stale or missing pointers"
+    )
+
+
+def assert_active_cardinality_progress_summary(progress: object) -> None:
+    """Validate schema-4 progress even while its current cycle is still partial."""
+
+    assert isinstance(progress, dict), "schema-4 active census progress is missing"
+    assert progress.get("schema_version") == CARDINALITY_SEAL_SCHEMA_VERSION
+    assert progress.get("strategy") == CARDINALITY_SEAL_STRATEGY
+    assert progress.get("mode") == CARDINALITY_SEAL_MODE
+    assert isinstance(progress.get("cycle_id"), str) and progress["cycle_id"]
+    generation = progress.get("generation")
+    assert isinstance(generation, int) and not isinstance(generation, bool) and generation >= 1
+    assert progress.get("phase") in {
+        "taxonomy",
+        "opening",
+        "frontier",
+        "candidates",
+        "closing",
+        "authoritative",
+    }
+    boundary = progress.get("boundary")
+    membership = progress.get("membership")
+    frontier = progress.get("frontier")
+    taxonomy = progress.get("taxonomy")
+    proof_status = progress.get("generation_proofs")
+    targets = progress.get("targets")
+    assert isinstance(boundary, dict), "active census boundary status is missing"
+    assert isinstance(membership, dict), "active census membership status is missing"
+    assert isinstance(frontier, dict), "active census frontier status is missing"
+    assert isinstance(taxonomy, dict), "active census taxonomy status is missing"
+    assert isinstance(proof_status, dict), (
+        "active census generation proofs status is missing"
+    )
+    assert isinstance(targets, dict), "active census targets status is missing"
+    total = boundary.get("total_count")
+    assert total is None or _nonnegative_integer(total)
+    head_sha = boundary.get("head_ref_sha256")
+    if head_sha is not None:
+        _sha256(head_sha, label="active census boundary head")
+    assert isinstance(boundary.get("stable"), bool)
+    for key in (
+        "observed_unique",
+        "pending_candidates",
+        "duplicate_references",
+        "duplicate_tender_ids",
+        "integrity_error_count",
+    ):
+        assert _nonnegative_integer(membership.get(key)), f"active census {key} is invalid"
+    unexplained = membership.get("unexplained_unique")
+    assert unexplained is None or _nonnegative_integer(unexplained)
+    assert isinstance(membership.get("complete"), bool)
+    for key in ("union_sha256", "bijection_sha256"):
+        if membership.get(key) is not None:
+            _sha256(membership[key], label=f"active census {key}")
+    for key in (
+        "nodes_total",
+        "pending",
+        "split",
+        "exact",
+        "blocked",
+        "superseded_by_cardinality",
+        "accepted_pages",
+        "page_ceiling_switches",
+    ):
+        assert _nonnegative_integer(frontier.get(key)), f"active census frontier {key}"
+    assert isinstance(frontier.get("clear_for_authority"), bool), (
+        "active census frontier clear-for-authority is invalid"
+    )
+    assert frontier["clear_for_authority"] == bool(
+        frontier["pending"] == 0 and frontier["blocked"] == 0
+    ), "active census frontier clear-for-authority arithmetic mismatch"
+    assert isinstance(taxonomy.get("complete"), bool)
+    if taxonomy.get("sha256") is not None:
+        _sha256(taxonomy["sha256"], label="active census taxonomy")
+    for key in (
+        "required",
+        "recorded",
+        "recorded_total",
+        "superseded",
+        "chain_number",
+        "matching_current_union",
+        "distinct_generations",
+    ):
+        assert _nonnegative_integer(proof_status.get(key)), (
+            f"active census proof status {key} is invalid"
+        )
+    assert proof_status.get("required") == 2
+    assert isinstance(proof_status.get("authoritative"), bool)
+    for key in ("total", "observed", "absent", "resolved"):
+        assert _nonnegative_integer(targets.get(key)), f"active census target {key}"
+    assert targets["resolved"] == targets["observed"] + targets["absent"]
+    assert targets["resolved"] <= targets["total"]
+    for key in (
+        "union_authoritative",
+        "partition_authoritative",
+        "absence_authoritative",
+        "completion_authoritative",
+        "complete",
+    ):
+        assert isinstance(progress.get(key), bool), f"active census {key} is invalid"
+    assert progress["partition_authoritative"] == progress["union_authoritative"]
+    assert progress["absence_authoritative"] == progress["union_authoritative"]
+    assert progress["complete"] == progress["union_authoritative"]
+    if progress["union_authoritative"]:
+        assert progress["phase"] == "authoritative"
+        assert boundary["stable"]
+        assert membership["complete"]
+        assert membership["pending_candidates"] == 0
+        assert membership["integrity_error_count"] == 0
+        assert proof_status["authoritative"]
+        assert frontier["clear_for_authority"]
+    assert progress["completion_authoritative"] == bool(
+        progress["union_authoritative"] and targets["resolved"] == targets["total"]
+    )
 
 
 def assert_active_hybrid_scan_contract(
@@ -1874,7 +3051,24 @@ def assert_active_date_scan_contract(
 
     assert isinstance(progress, dict), "active date scan progress is invalid"
     schema_version = progress.get("schema_version", 2)
-    assert schema_version in (2, 3), "active date scan schema version is unsupported"
+    assert schema_version in (2, 3, 4), "active date scan schema version is unsupported"
+    if schema_version == CARDINALITY_SEAL_SCHEMA_VERSION:
+        assert_active_cardinality_progress_summary(progress)
+        authority_progress = selected_cardinality_authority(progress)
+        if authority_progress is None:
+            assert evidence is None, (
+                "partial active census unexpectedly publishes authority evidence"
+            )
+        else:
+            if authority_progress is not progress:
+                assert authority_progress.get("cycle_id") != progress.get("cycle_id"), (
+                    "last active census authority belongs to the current partial cycle"
+                )
+                assert "last_authority" not in authority_progress, (
+                    "last active census authority is recursively nested"
+                )
+            assert_active_cardinality_scan_contract(authority_progress, evidence)
+        return
     if schema_version == 3:
         assert_active_hybrid_scan_contract(progress, evidence)
         return
@@ -2401,12 +3595,29 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
         active_scan.get("date_fallback") if isinstance(active_scan, dict) else None
     )
     authority_evidence = parsed_assets.get("active_scan_authority.json")
-    if isinstance(date_fallback, dict) and date_fallback.get("schema_version") == 3:
+    authority_schema = (
+        date_fallback.get("schema_version") if isinstance(date_fallback, dict) else None
+    )
+    descriptor_owner: dict | None = None
+    expected_evidence_schema: int | None = None
+    if authority_schema == 3 and isinstance(date_fallback, dict):
+        descriptor_owner = date_fallback
+        expected_evidence_schema = 1
+    elif authority_schema == CARDINALITY_SEAL_SCHEMA_VERSION:
+        descriptor_owner = selected_cardinality_authority(date_fallback)
+        expected_evidence_schema = CARDINALITY_SEAL_SCHEMA_VERSION
+    if descriptor_owner is not None:
+        assert authority_evidence is not None, (
+            "active scan authority status has no evidence asset"
+        )
         authority_descriptor = assets.get("active_scan_authority.json") or {}
         assert authority_descriptor.get("role") == "active_scan_authority_evidence", (
             "active scan authority evidence role mismatch"
         )
-        evidence_descriptor = date_fallback.get("evidence_asset") or {}
+        evidence_descriptor = descriptor_owner.get("evidence_asset") or {}
+        assert evidence_descriptor.get("schema_version") == expected_evidence_schema, (
+            "active scan authority evidence schema descriptor mismatch"
+        )
         assert evidence_descriptor.get("bytes") == authority_descriptor.get("bytes"), (
             "active scan authority evidence byte descriptor mismatch"
         )
@@ -2415,9 +3626,10 @@ def check(root: Path, expected_snapshot_id: str | None = None) -> dict[str, int]
         )
     else:
         assert authority_evidence is None, (
-            "legacy active scan unexpectedly publishes schema-3 authority evidence"
+            "legacy active scan unexpectedly publishes authority evidence"
         )
     assert_active_scan_progress_contract(active_scan, authority_evidence)
+    assert_active_missing_truth(active_scan, fetch_status.get("still_missing"))
     assert_region_backfill_contract(
         fetch_status.get("region_backfill"),
         index_by_ref,
@@ -2622,12 +3834,29 @@ def verify_remote_assets(
     )
     authority_result = results.get("active_scan_authority.json") or {}
     authority_evidence = authority_result.get("payload")
-    if isinstance(date_fallback, dict) and date_fallback.get("schema_version") == 3:
+    authority_schema = (
+        date_fallback.get("schema_version") if isinstance(date_fallback, dict) else None
+    )
+    descriptor_owner = None
+    expected_evidence_schema = None
+    if authority_schema == 3 and isinstance(date_fallback, dict):
+        descriptor_owner = date_fallback
+        expected_evidence_schema = 1
+    elif authority_schema == CARDINALITY_SEAL_SCHEMA_VERSION:
+        descriptor_owner = selected_cardinality_authority(date_fallback)
+        expected_evidence_schema = CARDINALITY_SEAL_SCHEMA_VERSION
+    if descriptor_owner is not None:
+        assert authority_evidence is not None, (
+            "remote active scan authority status has no evidence asset"
+        )
         authority_descriptor = assets.get("active_scan_authority.json") or {}
         assert authority_descriptor.get("role") == "active_scan_authority_evidence", (
             "remote active scan authority evidence role mismatch"
         )
-        evidence_descriptor = date_fallback.get("evidence_asset") or {}
+        evidence_descriptor = descriptor_owner.get("evidence_asset") or {}
+        assert evidence_descriptor.get("schema_version") == expected_evidence_schema, (
+            "remote active scan authority schema descriptor mismatch"
+        )
         assert evidence_descriptor.get("bytes") == authority_descriptor.get("bytes"), (
             "remote active scan authority byte descriptor mismatch"
         )
@@ -2636,9 +3865,10 @@ def verify_remote_assets(
         )
     else:
         assert authority_evidence is None, (
-            "remote legacy active scan unexpectedly publishes schema-3 evidence"
+            "remote legacy active scan unexpectedly publishes authority evidence"
         )
     assert_active_scan_progress_contract(active_scan, authority_evidence)
+    assert_active_missing_truth(active_scan, fetch_status.get("still_missing"))
     return results
 
 

@@ -1728,8 +1728,8 @@ class ExportContractTests(unittest.TestCase):
                 status["active_scan"]["date_fallback"]["evidence_asset"]["sha256"],
                 descriptor["sha256"],
             )
-            self.assertNotIn("active_refresh_sweep", status["still_missing"])
-            self.assertNotIn("active_refresh_sweep", manifest["still_missing"])
+            self.assertIn("active_refresh_sweep", status["still_missing"])
+            self.assertIn("active_refresh_sweep", manifest["still_missing"])
             self.assertEqual(check(root)["awarded"], 1)
             manifest_path = root / "data/manifest.json"
             malicious_manifest = json.loads(manifest_path.read_text())
