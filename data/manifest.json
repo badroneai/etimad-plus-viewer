@@ -1,8 +1,8 @@
 {
   "schema": "kashaf.static-warehouse",
   "schema_version": 3,
-  "snapshot_id": "run_29680112232_1",
-  "generated_at": "2026-07-19T08:40:18.617876+00:00",
+  "snapshot_id": "run_29680831622_1",
+  "generated_at": "2026-07-19T09:18:24.667592+00:00",
   "as_of": "2026-07-19T08:39:07.857932+00:00",
   "source_times": {
     "phase0Baseline": "2026-07-18T14:32:40.909697+00:00",
@@ -935,8 +935,8 @@
       "role": "retained_phase0_asset"
     },
     "fetch_status.json": {
-      "bytes": 10581,
-      "sha256": "11c529c2d3c84afc3dd0d4e54c70374edc7caa5d69fde70acd5b9bd0a81b26c5",
+      "bytes": 10659,
+      "sha256": "36b48ad9e942e7cb4dbf212bdd112295e7539a4aa4619fe4c4fe92760403262f",
       "contentType": "application/json",
       "role": "fetch_status"
     },
@@ -1105,7 +1105,7 @@
     "companies_ssr.json": 21956,
     "examination.json": 467516,
     "facets_open.json": 733,
-    "fetch_status.json": 10581,
+    "fetch_status.json": 10659,
     "inventory.json": 7024,
     "open.json": 6544074,
     "ssr_tenders.json": 34704,
