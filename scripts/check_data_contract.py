@@ -48,6 +48,8 @@ ACTIVE_INTERVAL_DOMAIN_START = "1900-01-01"
 ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE = "2101-01-01"
 SINGLE_DAY_REFINEMENT_VERSION = 1
 SINGLE_DAY_REFINEMENT_STRATEGY = "single_day_type_area_cover_v1"
+TEMPORAL_RECONCILIATION_VERSION = 2
+TEMPORAL_RECONCILIATION_GENERATIONS = {2, 3}
 SINGLE_DAY_REFINEMENT_QUERY_SHA256 = (
     "d078ee4040ba11bcea31164ee9cef853db2e39e77563e92a81ffbb27b1498eb8"
 )
@@ -2007,6 +2009,9 @@ def _assert_single_day_refinement_contract(
     *,
     covered_interval_count: int,
     blocked_interval_count: int,
+    refined_covered_interval_ids: set[str],
+    refined_blocked_interval_ids: set[str],
+    refined_blocked_interval_reasons: dict[str, str],
     coverage_complete: bool,
     cycle_terminal: bool,
 ) -> None:
@@ -2187,6 +2192,278 @@ def _assert_single_day_refinement_contract(
             "schema-5 single-day refinement ignores RAW replay errors"
         )
 
+    reconciliation = refinement.get("temporal_reconciliation")
+    assert isinstance(reconciliation, dict), (
+        "schema-5 temporal reconciliation status is missing or invalid"
+    )
+    if reconciliation is not None:
+        reconciliation_version = reconciliation.get("version")
+        assert (
+            isinstance(reconciliation_version, int)
+            and not isinstance(reconciliation_version, bool)
+            and reconciliation_version == TEMPORAL_RECONCILIATION_VERSION
+        ), "schema-5 temporal reconciliation version mismatch"
+        reconciliation_generation = reconciliation.get("generation")
+        assert (
+            isinstance(reconciliation_generation, int)
+            and not isinstance(reconciliation_generation, bool)
+            and reconciliation_generation in TEMPORAL_RECONCILIATION_GENERATIONS
+        ), "schema-5 temporal reconciliation generation is invalid"
+        maximum_generation = reconciliation.get("max_generation")
+        assert (
+            isinstance(maximum_generation, int)
+            and not isinstance(maximum_generation, bool)
+            and maximum_generation == max(TEMPORAL_RECONCILIATION_GENERATIONS)
+        ), "schema-5 temporal reconciliation maximum generation mismatch"
+        reconciliation_count_keys = (
+            "cells_total",
+            "cells_generation_2",
+            "cells_generation_3",
+            "cells_collecting",
+            "cells_awaiting_day_close",
+            "cells_sealed",
+            "cells_blocked",
+            "closing_proofs_total",
+            "closing_proofs_valid",
+        )
+        for key in reconciliation_count_keys:
+            assert _nonnegative_integer(reconciliation.get(key)), (
+                f"schema-5 temporal reconciliation {key} is invalid"
+            )
+        assert reconciliation["cells_total"] == (
+            reconciliation["cells_collecting"]
+            + reconciliation["cells_awaiting_day_close"]
+            + reconciliation["cells_sealed"]
+            + reconciliation["cells_blocked"]
+        ), "schema-5 temporal reconciliation cell arithmetic mismatch"
+        assert reconciliation["cells_total"] == (
+            reconciliation["cells_generation_2"]
+            + reconciliation["cells_generation_3"]
+        ), "schema-5 temporal reconciliation generation arithmetic mismatch"
+        assert reconciliation["cells_total"] <= refinement["cells_total"], (
+            "schema-5 temporal reconciliation exceeds refinement cells"
+        )
+        assert reconciliation["cells_sealed"] <= refinement["cells_covered"], (
+            "schema-5 temporal reconciliation seal lacks covered cell"
+        )
+        assert reconciliation["closing_proofs_valid"] <= reconciliation["closing_proofs_total"], (
+            "schema-5 temporal reconciliation proof arithmetic mismatch"
+        )
+        entries = reconciliation.get("entries")
+        assert isinstance(entries, list) and len(entries) == reconciliation["cells_total"], (
+            "schema-5 temporal reconciliation entries mismatch"
+        )
+        states = {
+            "collecting_generation": 0,
+            "awaiting_day_close": 0,
+            "sealed": 0,
+            "blocked": 0,
+        }
+        cell_ids: set[str] = set()
+        entry_generations: list[int] = []
+        entry_generation_counts = {2: 0, 3: 0}
+        minimum_closing_proofs = 0
+        for entry in entries:
+            assert isinstance(entry, dict), "schema-5 temporal reconciliation entry is invalid"
+            cell_id = entry.get("cell_id")
+            state = entry.get("state")
+            assert isinstance(cell_id, str) and cell_id and cell_id not in cell_ids, (
+                "schema-5 temporal reconciliation cell id is invalid"
+            )
+            assert state in states, "schema-5 temporal reconciliation state is invalid"
+            entry_generation = entry.get("generation")
+            assert (
+                isinstance(entry_generation, int)
+                and not isinstance(entry_generation, bool)
+                and entry_generation in TEMPORAL_RECONCILIATION_GENERATIONS
+            ), "schema-5 temporal reconciliation entry generation is invalid"
+            entry_generations.append(entry_generation)
+            entry_generation_counts[entry_generation] += 1
+            minimum_closing_proofs += entry_generation - 2
+            if state == "awaiting_day_close":
+                minimum_closing_proofs += 1
+            elif state == "sealed":
+                minimum_closing_proofs += 2
+            if state == "sealed":
+                assert cell_id in refined_covered_interval_ids, (
+                    "schema-5 sealed temporal reconciliation cell is not a "
+                    "refined covered interval"
+                )
+            elif state == "blocked":
+                assert cell_id in refined_blocked_interval_ids, (
+                    "schema-5 blocked temporal reconciliation cell is not a "
+                    "refined terminal-gap interval"
+                )
+            cell_ids.add(cell_id)
+            states[str(state)] += 1
+            baseline_unique = entry.get("baseline_union_unique")
+            assert (
+                isinstance(baseline_unique, int)
+                and not isinstance(baseline_unique, bool)
+                and baseline_unique > 0
+            ), "schema-5 temporal reconciliation baseline cardinality is invalid"
+            baseline_union = _sha256(
+                entry.get("baseline_union_sha256"),
+                label="schema-5 temporal reconciliation baseline union",
+            )
+            baseline_bijection = _sha256(
+                entry.get("baseline_bijection_sha256"),
+                label="schema-5 temporal reconciliation baseline bijection",
+            )
+            generation_history = entry.get("generation_history")
+            assert isinstance(generation_history, list), (
+                "schema-5 temporal reconciliation generation history is missing or invalid"
+            )
+            expected_history_generations = list(range(1, entry_generation))
+            actual_history_generations: list[int] = []
+            for historical in generation_history:
+                assert isinstance(historical, dict), (
+                    "schema-5 temporal reconciliation generation history entry is invalid"
+                )
+                historical_generation = historical.get("generation")
+                assert (
+                    isinstance(historical_generation, int)
+                    and not isinstance(historical_generation, bool)
+                    and historical_generation > 0
+                ), "schema-5 temporal reconciliation historical generation is invalid"
+                actual_history_generations.append(historical_generation)
+                historical_unique = historical.get("union_unique")
+                assert (
+                    isinstance(historical_unique, int)
+                    and not isinstance(historical_unique, bool)
+                    and historical_unique > 0
+                ), "schema-5 temporal reconciliation historical cardinality is invalid"
+                _sha256(
+                    historical.get("union_sha256"),
+                    label="schema-5 temporal reconciliation historical union",
+                )
+                _sha256(
+                    historical.get("bijection_sha256"),
+                    label="schema-5 temporal reconciliation historical bijection",
+                )
+            assert actual_history_generations == expected_history_generations, (
+                "schema-5 temporal reconciliation generation history sequence mismatch"
+            )
+            if entry_generation == 3:
+                prior_history = generation_history[-2]
+                latest_history = generation_history[-1]
+                assert any(
+                    prior_history[key] != latest_history[key]
+                    for key in (
+                        "union_unique",
+                        "union_sha256",
+                        "bijection_sha256",
+                    )
+                ), "schema-5 temporal reconciliation generation-3 history has no drift"
+            latest_history = generation_history[-1]
+            assert (
+                latest_history["union_unique"] == baseline_unique
+                and latest_history["union_sha256"] == baseline_union
+                and latest_history["bijection_sha256"] == baseline_bijection
+            ), "schema-5 temporal reconciliation baseline does not match generation history"
+            generation_values = (
+                entry.get("generation_union_unique"),
+                entry.get("generation_union_sha256"),
+                entry.get("generation_bijection_sha256"),
+            )
+            if state in {"awaiting_day_close", "sealed"}:
+                assert (
+                    isinstance(generation_values[0], int)
+                    and not isinstance(generation_values[0], bool)
+                    and generation_values[0] > 0
+                ), "schema-5 temporal reconciliation generation cardinality is invalid"
+                assert generation_values[0] == baseline_unique, (
+                    "schema-5 temporal reconciliation cardinality did not converge"
+                )
+                assert (
+                    _sha256(
+                        generation_values[1],
+                        label="schema-5 temporal reconciliation generation union",
+                    )
+                    == baseline_union
+                ), "schema-5 temporal reconciliation union did not converge"
+                assert (
+                    _sha256(
+                        generation_values[2],
+                        label="schema-5 temporal reconciliation generation bijection",
+                    )
+                    == baseline_bijection
+                ), "schema-5 temporal reconciliation bijection did not converge"
+                assert entry.get("failure_reason") is None, (
+                    "schema-5 converged temporal reconciliation reports failure"
+                )
+            elif state == "collecting_generation":
+                assert generation_values == (None, None, None), (
+                    "schema-5 collecting reconciliation claims a frozen generation"
+                )
+                assert entry.get("failure_reason") is None, (
+                    "schema-5 collecting reconciliation reports failure"
+                )
+            else:
+                reason = entry.get("failure_reason")
+                assert isinstance(reason, str) and reason.strip(), (
+                    "schema-5 blocked temporal reconciliation lacks reason"
+                )
+                assert reason == refined_blocked_interval_reasons.get(cell_id), (
+                    "schema-5 blocked temporal reconciliation failure reason "
+                    "does not match terminal interval"
+                )
+                if generation_values != (None, None, None):
+                    assert all(value is not None for value in generation_values), (
+                        "schema-5 blocked temporal reconciliation has partial "
+                        "generation values"
+                    )
+                    assert (
+                        isinstance(generation_values[0], int)
+                        and not isinstance(generation_values[0], bool)
+                        and generation_values[0] > 0
+                    ), "schema-5 blocked temporal reconciliation cardinality is invalid"
+                    assert generation_values[0] == baseline_unique, (
+                        "schema-5 blocked temporal reconciliation cardinality did not converge"
+                    )
+                    assert (
+                        _sha256(
+                            generation_values[1],
+                            label="schema-5 blocked temporal reconciliation generation union",
+                        )
+                        == baseline_union
+                    ), "schema-5 blocked temporal reconciliation union did not converge"
+                    assert (
+                        _sha256(
+                            generation_values[2],
+                            label=(
+                                "schema-5 blocked temporal reconciliation "
+                                "generation bijection"
+                            ),
+                        )
+                        == baseline_bijection
+                    ), "schema-5 blocked temporal reconciliation bijection did not converge"
+        assert states["collecting_generation"] == reconciliation["cells_collecting"]
+        assert states["awaiting_day_close"] == reconciliation["cells_awaiting_day_close"]
+        assert states["sealed"] == reconciliation["cells_sealed"]
+        assert states["blocked"] == reconciliation["cells_blocked"]
+        assert reconciliation["generation"] == max(entry_generations, default=2), (
+            "schema-5 temporal reconciliation generation maximum mismatch"
+        )
+        assert reconciliation["cells_generation_2"] == entry_generation_counts[2], (
+            "schema-5 temporal reconciliation generation-2 count mismatch"
+        )
+        assert reconciliation["cells_generation_3"] == entry_generation_counts[3], (
+            "schema-5 temporal reconciliation generation-3 count mismatch"
+        )
+        assert reconciliation["closing_proofs_total"] >= minimum_closing_proofs, (
+            "schema-5 temporal reconciliation has fewer closing proofs than "
+            "its cell generations and states require"
+        )
+        if reconciliation["cells_total"] == 0:
+            assert reconciliation["closing_proofs_total"] == 0, (
+                "schema-5 temporal reconciliation has orphan closing proofs"
+            )
+        if refinement["raw_replay_valid"]:
+            assert (
+                reconciliation["closing_proofs_valid"] == reconciliation["closing_proofs_total"]
+            ), "schema-5 temporal reconciliation has invalid closing proofs"
+
     if coverage_complete or cycle_terminal:
         assert refinement["cells_refining"] == 0, (
             "schema-5 terminal refinement still has refining cells"
@@ -2230,6 +2507,19 @@ def _assert_single_day_refinement_contract(
         assert refinement["seals_valid"] == refinement["seals_total"], (
             "schema-5 terminal refinement has invalid seals"
         )
+        if reconciliation is not None:
+            assert reconciliation["cells_collecting"] == 0, (
+                "schema-5 terminal temporal reconciliation is still collecting"
+            )
+            assert reconciliation["cells_awaiting_day_close"] == 0, (
+                "schema-5 terminal temporal reconciliation awaits day close"
+            )
+            assert reconciliation["cells_blocked"] == 0, (
+                "schema-5 terminal temporal reconciliation is blocked"
+            )
+            assert reconciliation["cells_sealed"] == reconciliation["cells_total"], (
+                "schema-5 terminal temporal reconciliation cells_sealed mismatch"
+            )
 
 
 def assert_active_interval_coverage_contract(
@@ -2309,6 +2599,9 @@ def assert_active_interval_coverage_contract(
     derived_leaves = {"covered": 0, "terminal_gap": 0}
     refined_covered_intervals = 0
     refined_blocked_intervals = 0
+    refined_covered_interval_ids: set[str] = set()
+    refined_blocked_interval_ids: set[str] = set()
+    refined_blocked_interval_reasons: dict[str, str] = {}
     for index, interval in enumerate(intervals):
         label = f"schema-5 coverage interval {index}"
         assert isinstance(interval, dict), f"{label} is invalid"
@@ -2377,6 +2670,7 @@ def assert_active_interval_coverage_contract(
                 f"{label} refined covered marker is not a single covered day"
             )
             refined_covered_intervals += 1
+            refined_covered_interval_ids.add(interval_id)
         if isinstance(terminal_reason, str) and terminal_reason.startswith(
             SINGLE_DAY_REFINEMENT_BLOCKED_PREFIXES
         ):
@@ -2389,6 +2683,12 @@ def assert_active_interval_coverage_contract(
                 if terminal_reason.startswith(prefix)
             ), f"{label} refined blocked marker has no reason"
             refined_blocked_intervals += 1
+            refined_blocked_interval_ids.add(interval_id)
+            refined_blocked_interval_reasons[interval_id] = next(
+                terminal_reason.removeprefix(prefix).strip()
+                for prefix in SINGLE_DAY_REFINEMENT_BLOCKED_PREFIXES
+                if terminal_reason.startswith(prefix)
+            )
         derived_units[str(state)] += units
         derived_leaves[str(state)] += 1
         previous_end = to_day
@@ -2469,6 +2769,9 @@ def assert_active_interval_coverage_contract(
         progress.get("single_day_refinement"),
         covered_interval_count=refined_covered_intervals,
         blocked_interval_count=refined_blocked_intervals,
+        refined_covered_interval_ids=refined_covered_interval_ids,
+        refined_blocked_interval_ids=refined_blocked_interval_ids,
+        refined_blocked_interval_reasons=refined_blocked_interval_reasons,
         coverage_complete=bool(coverage.get("complete")),
         cycle_terminal=terminal,
     )
