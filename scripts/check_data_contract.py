@@ -46,6 +46,34 @@ ACTIVE_DATE_DOMAIN_START = "1900-01-01"
 ACTIVE_DATE_DOMAIN_END = "2100-12-31"
 ACTIVE_INTERVAL_DOMAIN_START = "1900-01-01"
 ACTIVE_INTERVAL_DOMAIN_END_EXCLUSIVE = "2101-01-01"
+SINGLE_DAY_REFINEMENT_VERSION = 1
+SINGLE_DAY_REFINEMENT_STRATEGY = "single_day_type_area_cover_v1"
+SINGLE_DAY_REFINEMENT_QUERY_SHA256 = (
+    "d078ee4040ba11bcea31164ee9cef853db2e39e77563e92a81ffbb27b1498eb8"
+)
+SINGLE_DAY_REFINEMENT_RAW_PREFIX = (
+    "data",
+    "official_warehouse",
+    "raw",
+    "priority_save",
+)
+SINGLE_DAY_REFINEMENT_TAXONOMIES = {
+    "type": {
+        "values": 13,
+        "sha256": "9985e4bc429dfad5503375de846a5823f815e9b55f4bb0f8a8bc7fdc5dd2e4eb",
+    },
+    "area": {
+        "values": 13,
+        "sha256": "5cd180eab2ba28b97e17a8ca9c3c49f5aef18837bbc08587b0c121fa12546da1",
+    },
+}
+SINGLE_DAY_REFINEMENT_COVERED_REASON = (
+    "enumerated_single_day_type_partition"
+)
+SINGLE_DAY_REFINEMENT_BLOCKED_PREFIXES = (
+    "single_day_type_refinement_blocked:",
+    "single_day_type_refinement_failed:",
+)
 ACTIVE_LIST_ENDPOINT = (
     "https://tenders.etimad.sa/Tender/AllSupplierTendersForVisitorAsync"
 )
@@ -1974,6 +2002,236 @@ def assert_active_cardinality_progress_summary(progress: object) -> None:
     )
 
 
+def _assert_single_day_refinement_contract(
+    refinement: object,
+    *,
+    covered_interval_count: int,
+    blocked_interval_count: int,
+    coverage_complete: bool,
+    cycle_terminal: bool,
+) -> None:
+    """Validate the bounded type/area cover fallback for dense single days."""
+
+    if refinement is None:
+        assert covered_interval_count == 0 and blocked_interval_count == 0, (
+            "schema-5 refined interval is missing single-day refinement status"
+        )
+        return
+
+    assert isinstance(refinement, dict), (
+        "schema-5 single-day refinement status is invalid"
+    )
+    version = refinement.get("version")
+    assert (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == SINGLE_DAY_REFINEMENT_VERSION
+    ), "schema-5 single-day refinement version mismatch"
+    assert refinement.get("strategy") == SINGLE_DAY_REFINEMENT_STRATEGY, (
+        "schema-5 single-day refinement strategy mismatch"
+    )
+    query_hash = _sha256(
+        refinement.get("query_hash"),
+        label="schema-5 single-day refinement query",
+    )
+    assert query_hash == SINGLE_DAY_REFINEMENT_QUERY_SHA256, (
+        "schema-5 single-day refinement query contract mismatch"
+    )
+
+    taxonomy = refinement.get("taxonomy")
+    assert isinstance(taxonomy, dict), (
+        "schema-5 single-day refinement taxonomy is missing"
+    )
+    entries = taxonomy.get("entries")
+    assert isinstance(entries, list), (
+        "schema-5 single-day refinement taxonomy entries are missing"
+    )
+    taxonomy_kinds = [
+        entry.get("kind") if isinstance(entry, dict) else None
+        for entry in entries
+    ]
+    assert taxonomy_kinds == ["type", "area"], (
+        "schema-5 single-day refinement taxonomy kinds mismatch"
+    )
+    for entry in entries:
+        assert isinstance(entry, dict)
+        kind = str(entry["kind"])
+        expected = SINGLE_DAY_REFINEMENT_TAXONOMIES[kind]
+        assert entry.get("values") == expected["values"] and _nonnegative_integer(
+            entry.get("values")
+        ), f"schema-5 single-day refinement taxonomy value count mismatch: {kind}"
+        assert entry.get("sha256") == expected["sha256"], (
+            f"schema-5 single-day refinement taxonomy SHA mismatch: {kind}"
+        )
+        raw_path = str(entry.get("raw_path") or "").strip()
+        path = Path(raw_path)
+        assert (
+            raw_path
+            and not path.is_absolute()
+            and ".." not in path.parts
+            and path.parts[: len(SINGLE_DAY_REFINEMENT_RAW_PREFIX)]
+            == SINGLE_DAY_REFINEMENT_RAW_PREFIX
+            and path.suffix == ".bin"
+        ), f"schema-5 single-day refinement taxonomy RAW path is unsafe: {kind}"
+        assert entry.get("source_mode") == "locked_official_seed", (
+            f"schema-5 single-day refinement taxonomy source mode mismatch: {kind}"
+        )
+        assert isinstance(entry.get("raw_replay_valid"), bool), (
+            f"schema-5 single-day refinement taxonomy RAW replay flag is invalid: {kind}"
+        )
+    assert isinstance(taxonomy.get("raw_replay_valid"), bool), (
+        "schema-5 single-day refinement taxonomy RAW replay flag is invalid"
+    )
+    assert taxonomy["raw_replay_valid"] is all(
+        entry["raw_replay_valid"] for entry in entries
+    ), "schema-5 single-day refinement taxonomy RAW replay arithmetic mismatch"
+
+    count_keys = (
+        "cells_total",
+        "cells_refining",
+        "cells_covered",
+        "cells_blocked",
+        "nodes_total",
+        "nodes_pending",
+        "nodes_pending_page2",
+        "nodes_exact",
+        "nodes_blocked",
+        "accepted_pages",
+        "probe_pages",
+        "max_page_requested",
+        "seals_total",
+        "seals_valid",
+        "raw_replay_error_count",
+        "identity_conflict_count",
+        "duplicate_observations",
+        "overlap_count",
+    )
+    for key in count_keys:
+        assert _nonnegative_integer(refinement.get(key)), (
+            f"schema-5 single-day refinement {key} is invalid"
+        )
+
+    assert refinement["cells_total"] > 0, (
+        "schema-5 single-day refinement has no refinement cells"
+    )
+    assert refinement["cells_total"] == (
+        refinement["cells_refining"]
+        + refinement["cells_covered"]
+        + refinement["cells_blocked"]
+    ), "schema-5 single-day refinement cell arithmetic mismatch"
+    assert refinement["nodes_total"] == (
+        refinement["nodes_pending"]
+        + refinement["nodes_pending_page2"]
+        + refinement["nodes_exact"]
+        + refinement["nodes_blocked"]
+    ), "schema-5 single-day refinement node arithmetic mismatch"
+    assert refinement["nodes_total"] >= 13 * refinement["cells_total"], (
+        "schema-5 single-day refinement node geometry is impossible"
+    )
+    assert refinement["cells_covered"] == covered_interval_count, (
+        "schema-5 single-day refinement covered-cell marker mismatch"
+    )
+    assert refinement["cells_blocked"] == blocked_interval_count, (
+        "schema-5 single-day refinement blocked-cell marker mismatch"
+    )
+
+    max_page_requested = refinement["max_page_requested"]
+    assert max_page_requested <= 2, (
+        "schema-5 single-day refinement exceeds the page-2 ceiling"
+    )
+    pages_requested = refinement["accepted_pages"] + refinement["probe_pages"]
+    assert (max_page_requested == 0) == (pages_requested == 0), (
+        "schema-5 single-day refinement page metrics are inconsistent"
+    )
+    assert pages_requested >= refinement["nodes_exact"], (
+        "schema-5 single-day refinement has fewer page proofs than exact nodes"
+    )
+    assert pages_requested <= 4 * refinement["nodes_total"], (
+        "schema-5 single-day refinement page metrics exceed bounded retries"
+    )
+
+    assert refinement["seals_valid"] <= refinement["seals_total"], (
+        "schema-5 single-day refinement valid seal count exceeds total"
+    )
+    assert refinement["seals_total"] <= refinement["cells_total"], (
+        "schema-5 single-day refinement seal count exceeds cells"
+    )
+    assert refinement["seals_valid"] == refinement["cells_covered"], (
+        "schema-5 single-day refinement covered cell lacks a valid seal"
+    )
+
+    raw_errors = refinement.get("raw_replay_errors")
+    assert isinstance(raw_errors, list) and all(
+        isinstance(error, str) and error.strip() for error in raw_errors
+    ), "schema-5 single-day refinement RAW replay errors are invalid"
+    assert refinement["raw_replay_error_count"] == len(raw_errors), (
+        "schema-5 single-day refinement RAW replay error count mismatch"
+    )
+    identity_conflicts = refinement.get("identity_conflicts")
+    assert isinstance(identity_conflicts, list) and all(
+        isinstance(conflict, str) and conflict.strip()
+        for conflict in identity_conflicts
+    ), "schema-5 single-day refinement identity conflicts are invalid"
+    assert refinement["identity_conflict_count"] == len(identity_conflicts), (
+        "schema-5 single-day refinement identity conflict count mismatch"
+    )
+    assert isinstance(refinement.get("raw_replay_valid"), bool), (
+        "schema-5 single-day refinement RAW replay flag is invalid"
+    )
+    if taxonomy["raw_replay_valid"] is False:
+        assert refinement["raw_replay_valid"] is False, (
+            "schema-5 single-day refinement replays invalid taxonomy as valid"
+        )
+    if refinement["raw_replay_error_count"] > 0:
+        assert refinement["raw_replay_valid"] is False, (
+            "schema-5 single-day refinement ignores RAW replay errors"
+        )
+
+    if coverage_complete or cycle_terminal:
+        assert refinement["cells_refining"] == 0, (
+            "schema-5 terminal refinement still has refining cells"
+        )
+        assert refinement["cells_blocked"] == 0, (
+            "schema-5 terminal refinement still has blocked cells"
+        )
+        assert refinement["nodes_pending"] == 0, (
+            "schema-5 terminal refinement still has pending nodes"
+        )
+        assert refinement["nodes_pending_page2"] == 0, (
+            "schema-5 terminal refinement still has pending page-2 nodes"
+        )
+        assert refinement["nodes_blocked"] == 0, (
+            "schema-5 terminal refinement still has blocked nodes"
+        )
+        assert refinement["nodes_exact"] == refinement["nodes_total"], (
+            "schema-5 terminal refinement has non-exact nodes"
+        )
+        assert taxonomy["raw_replay_valid"] is True, (
+            "schema-5 terminal refinement taxonomy RAW replay is invalid"
+        )
+        assert refinement["raw_replay_valid"] is True, (
+            "schema-5 terminal refinement RAW replay is invalid"
+        )
+        assert refinement["raw_replay_error_count"] == 0, (
+            "schema-5 terminal refinement has RAW replay errors"
+        )
+        assert refinement["identity_conflict_count"] == 0, (
+            "schema-5 terminal refinement has identity conflicts"
+        )
+        assert refinement["overlap_count"] == 0, (
+            "schema-5 terminal refinement has overlap conflicts"
+        )
+        assert refinement["cells_covered"] == refinement["cells_total"], (
+            "schema-5 terminal refinement has uncovered cells"
+        )
+        assert refinement["seals_total"] == refinement["cells_total"], (
+            "schema-5 terminal refinement has missing seals"
+        )
+        assert refinement["seals_valid"] == refinement["seals_total"], (
+            "schema-5 terminal refinement has invalid seals"
+        )
+
+
 def assert_active_interval_coverage_contract(
     progress: object,
     evidence: object = None,
@@ -2049,6 +2307,8 @@ def assert_active_interval_coverage_contract(
     previous_end: date | None = None
     derived_units = {"covered": 0, "terminal_gap": 0}
     derived_leaves = {"covered": 0, "terminal_gap": 0}
+    refined_covered_intervals = 0
+    refined_blocked_intervals = 0
     for index, interval in enumerate(intervals):
         label = f"schema-5 coverage interval {index}"
         assert isinstance(interval, dict), f"{label} is invalid"
@@ -2112,6 +2372,23 @@ def assert_active_interval_coverage_contract(
             assert isinstance(terminal_reason, str) and terminal_reason.strip(), (
                 f"{label} terminal gap reason is missing"
             )
+        if terminal_reason == SINGLE_DAY_REFINEMENT_COVERED_REASON:
+            assert state == "covered" and units == 1, (
+                f"{label} refined covered marker is not a single covered day"
+            )
+            refined_covered_intervals += 1
+        if isinstance(terminal_reason, str) and terminal_reason.startswith(
+            SINGLE_DAY_REFINEMENT_BLOCKED_PREFIXES
+        ):
+            assert state == "terminal_gap" and units == 1, (
+                f"{label} refined blocked marker is not a single gap day"
+            )
+            assert any(
+                terminal_reason.removeprefix(prefix).strip()
+                for prefix in SINGLE_DAY_REFINEMENT_BLOCKED_PREFIXES
+                if terminal_reason.startswith(prefix)
+            ), f"{label} refined blocked marker has no reason"
+            refined_blocked_intervals += 1
         derived_units[str(state)] += units
         derived_leaves[str(state)] += 1
         previous_end = to_day
@@ -2188,6 +2465,13 @@ def assert_active_interval_coverage_contract(
     )
 
     terminal = derived_pending == 0
+    _assert_single_day_refinement_contract(
+        progress.get("single_day_refinement"),
+        covered_interval_count=refined_covered_intervals,
+        blocked_interval_count=refined_blocked_intervals,
+        coverage_complete=bool(coverage.get("complete")),
+        cycle_terminal=terminal,
+    )
     expected_complete = bool(
         terminal
         and derived_units["terminal_gap"] == 0

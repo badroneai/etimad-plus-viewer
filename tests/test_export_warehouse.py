@@ -42,6 +42,7 @@ from check_data_contract import (  # noqa: E402
     check,
 )
 from schema5_fixtures import (  # noqa: E402
+    attach_covered_single_day_refinement,
     interval_coverage_progress,
     outer_active_scan,
 )
@@ -997,7 +998,9 @@ class ExportContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             database = root / "official.sqlite3"
-            progress = interval_coverage_progress()
+            progress = attach_covered_single_day_refinement(
+                interval_coverage_progress()
+            )
             active_scan = outer_active_scan(progress)
             connection = sqlite3.connect(database)
             connection.executescript(

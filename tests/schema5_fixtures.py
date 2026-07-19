@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Sequence
 
 
@@ -13,6 +13,115 @@ DOMAIN_END = date(2101, 1, 1)
 
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def single_day_refinement_status(
+    *,
+    state: str = "covered",
+) -> dict[str, Any]:
+    if state not in {"refining", "covered", "blocked"}:
+        raise ValueError("unsupported refinement fixture state")
+    covered = int(state == "covered")
+    refining = int(state == "refining")
+    blocked = int(state == "blocked")
+    exact_nodes = 169 if covered else 0
+    pending_nodes = 169 if refining else 0
+    blocked_nodes = 169 if blocked else 0
+    replay_valid = state != "blocked"
+    return {
+        "version": 1,
+        "strategy": "single_day_type_area_cover_v1",
+        "query_hash": (
+            "d078ee4040ba11bcea31164ee9cef853db2e39e77563e92a81ffbb27b1498eb8"
+        ),
+        "taxonomy": {
+            "entries": [
+                {
+                    "kind": "type",
+                    "values": 13,
+                    "sha256": (
+                        "9985e4bc429dfad5503375de846a5823f815e9b55f4bb0f8a8bc7fdc5dd2e4eb"
+                    ),
+                    "raw_path": (
+                        "data/official_warehouse/raw/priority_save/fixture/"
+                        "taxonomy-type.bin"
+                    ),
+                    "source_mode": "locked_official_seed",
+                    "raw_replay_valid": True,
+                },
+                {
+                    "kind": "area",
+                    "values": 13,
+                    "sha256": (
+                        "5cd180eab2ba28b97e17a8ca9c3c49f5aef18837bbc08587b0c121fa12546da1"
+                    ),
+                    "raw_path": (
+                        "data/official_warehouse/raw/priority_save/fixture/"
+                        "taxonomy-area.bin"
+                    ),
+                    "source_mode": "locked_official_seed",
+                    "raw_replay_valid": True,
+                },
+            ],
+            "raw_replay_valid": True,
+        },
+        "cells_total": 1,
+        "cells_refining": refining,
+        "cells_covered": covered,
+        "cells_blocked": blocked,
+        "nodes_total": 169,
+        "nodes_pending": pending_nodes,
+        "nodes_pending_page2": 0,
+        "nodes_exact": exact_nodes,
+        "nodes_blocked": blocked_nodes,
+        "accepted_pages": 169 if covered else 0,
+        "probe_pages": 169 if covered else 0,
+        "max_page_requested": 2 if covered else 0,
+        "seals_total": covered,
+        "seals_valid": covered,
+        "raw_replay_valid": replay_valid,
+        "raw_replay_error_count": blocked,
+        "raw_replay_errors": ["fixture:blocked"] if blocked else [],
+        "identity_conflict_count": 0,
+        "identity_conflicts": [],
+        "duplicate_observations": 2,
+        "overlap_count": 0,
+    }
+
+
+def attach_covered_single_day_refinement(
+    progress: dict[str, Any],
+) -> dict[str, Any]:
+    """Split the first covered fixture leaf and mark its first day as refined."""
+
+    result = deepcopy(progress)
+    first = result["coverage"]["intervals"][0]
+    if first["state"] != "covered":
+        raise ValueError("the first fixture interval must be covered")
+    start = date.fromisoformat(first["from_day"])
+    end = date.fromisoformat(first["to_day_exclusive"])
+    split = start + timedelta(days=1)
+    refined = {
+        **first,
+        "interval_id": f"{first['interval_id']}-refined",
+        "to_day_exclusive": split.isoformat(),
+        "units": 1,
+        "total_count": 49,
+        "terminal_reason": "enumerated_single_day_type_partition",
+    }
+    remainder = {
+        **first,
+        "interval_id": f"{first['interval_id']}-remainder",
+        "from_day": split.isoformat(),
+        "units": (end - split).days,
+    }
+    result["coverage"]["intervals"][:1] = [refined, remainder]
+    result["coverage"]["leaves_covered"] += 1
+    result["frontier"]["cells_total"] += 1
+    result["frontier"]["covered"] += 1
+    result["frontier"]["accepted_pages"] += 1
+    result["single_day_refinement"] = single_day_refinement_status()
+    return result
 
 
 def interval_coverage_progress(
