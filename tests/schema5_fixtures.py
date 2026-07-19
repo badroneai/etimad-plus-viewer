@@ -72,10 +72,12 @@ def single_day_refinement_status(
         "nodes_total": 169,
         "nodes_pending": pending_nodes,
         "nodes_pending_page2": 0,
+        "nodes_mirror_pending": 0,
         "nodes_exact": exact_nodes,
         "nodes_blocked": blocked_nodes,
         "accepted_pages": 169 if covered else 0,
         "probe_pages": 169 if covered else 0,
+        "mirror_pages": 0,
         "max_page_requested": 2 if covered else 0,
         "seals_total": covered,
         "seals_valid": covered,
@@ -86,6 +88,20 @@ def single_day_refinement_status(
         "identity_conflicts": [],
         "duplicate_observations": 2,
         "overlap_count": 0,
+        "mirror_cover": {
+            "version": 1,
+            "strategy": "single_day_bidirectional_submission_cover_v1",
+            "query_hash": (
+                "fb4de883da302089b8f30490a62431af6aea76ac3de86e3714105cee1d628d48"
+            ),
+            "covers_total": 0,
+            "migrations_total": 0,
+            "covers_pending": 0,
+            "covers_covered": 0,
+            "covers_blocked": 0,
+            "covers_failed": 0,
+            "evidence": {},
+        },
         "temporal_reconciliation": {
             "version": 2,
             "generation": 2,
