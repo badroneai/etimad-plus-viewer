@@ -173,6 +173,17 @@ def interval_coverage_progress(
         "competition_progress": {
             "basis": "cycle_opening_root_total_non_authoritative",
             "opening_total": opening_total,
+            "opening_evidence": (
+                {
+                    "attempt_no": 1,
+                    "capture_kind": "accepted",
+                    "raw_path": "data/official_warehouse/raw/root-page-one.bin",
+                    "sha256": _sha("root-page-one"),
+                    "observed_at": "2026-07-19T00:05:00+00:00",
+                }
+                if opening_total is not None
+                else None
+            ),
             "observed_unique": unique_references,
             "observed_against_opening_total": (
                 min(unique_references, opening_total)

@@ -2249,6 +2249,44 @@ def assert_active_interval_coverage_contract(
     assert opening_total is None or _nonnegative_integer(opening_total), (
         "schema-5 opening competition total is invalid"
     )
+    opening_required = bool(
+        progress["cycle_terminal"]
+        or coverage["units_covered"] > 0
+        or coverage["units_gap"] > 0
+        or observations["observation_records"] > 0
+        or progress.get("frontier", {}).get("max_page_requested", 0) > 0
+    )
+    if opening_required:
+        assert opening_total is not None, (
+            "schema-5 progress requires a replayed opening competition denominator"
+        )
+    opening_evidence = competition.get("opening_evidence")
+    if opening_total is None:
+        assert opening_evidence is None, (
+            "schema-5 opening competition evidence exists without a denominator"
+        )
+    else:
+        assert isinstance(opening_evidence, dict), (
+            "schema-5 opening competition evidence is missing"
+        )
+        assert (
+            isinstance(opening_evidence.get("attempt_no"), int)
+            and not isinstance(opening_evidence["attempt_no"], bool)
+            and opening_evidence["attempt_no"] >= 1
+        ), "schema-5 opening competition evidence attempt is invalid"
+        assert opening_evidence.get("capture_kind") in {"probe", "accepted"}, (
+            "schema-5 opening competition evidence kind is invalid"
+        )
+        assert isinstance(opening_evidence.get("raw_path"), str) and (
+            opening_evidence["raw_path"]
+        ), "schema-5 opening competition RAW pointer is missing"
+        _sha256(
+            opening_evidence.get("sha256"),
+            label="schema-5 opening competition evidence",
+        )
+        assert parse_iso_datetime(opening_evidence.get("observed_at")) is not None, (
+            "schema-5 opening competition evidence timestamp is invalid"
+        )
     observed_unique = observations["unique_references"]
     assert competition.get("observed_unique") == observed_unique, (
         "schema-5 competition observation count mismatch"

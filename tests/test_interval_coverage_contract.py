@@ -91,6 +91,22 @@ class IntervalCoverageContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "cannot be authoritative"):
             assert_active_interval_coverage_contract(forged_authority)
 
+        missing_terminal_denominator = interval_coverage_progress()
+        missing_terminal_denominator["competition_progress"].update(
+            {
+                "opening_total": None,
+                "opening_evidence": None,
+                "observed_against_opening_total": 0,
+                "arrivals_or_drift_beyond_opening_total": 0,
+                "scanned_percent": None,
+            }
+        )
+        missing_terminal_denominator["official_active_scanned_percent"] = None
+        with self.assertRaisesRegex(AssertionError, "requires a replayed opening"):
+            assert_active_interval_coverage_contract(
+                missing_terminal_denominator
+            )
+
     def test_interval_geometry_and_arithmetic_fail_closed(self) -> None:
         cases = []
 
