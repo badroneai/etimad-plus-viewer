@@ -1009,6 +1009,22 @@ class IntervalCoverageContractTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(AssertionError, message):
                 assert_active_interval_coverage_contract(progress)
 
+    def test_temporal_reconciliation_allows_driftless_generation_3_history(self) -> None:
+        progress = attach_covered_single_day_refinement(interval_coverage_progress())
+        progress["single_day_refinement"]["temporal_reconciliation"] = (
+            self._sealed_temporal_reconciliation(generation=3)
+        )
+        driftless_history = progress["single_day_refinement"]["temporal_reconciliation"][
+            "entries"
+        ][0]["generation_history"]
+        driftless_history[0].update(
+            {
+                key: driftless_history[1][key]
+                for key in ("union_unique", "union_sha256", "bijection_sha256")
+            }
+        )
+        assert_active_interval_coverage_contract(progress)
+
     def test_terminal_refinement_rejects_unfinished_or_conflicting_state(
         self,
     ) -> None:
