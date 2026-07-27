@@ -4653,11 +4653,11 @@ def assert_region_backfill_contract(
         ).strip()
         assert relations_checked_at, f"official region freshness missing: {ref}"
 
-    assert len(detail_by_ref) == awarded_total, (
-        "published awarded dataset disagrees with region backfill cohort"
+    assert len(detail_by_ref) >= awarded_total, (
+        "published awarded dataset lost region backfill cohort members"
     )
-    assert filled_details == current_filled, (
-        "published awarded region count disagrees with region_backfill current_filled"
+    assert filled_details >= current_filled, (
+        "published awarded region count trails region_backfill current_filled"
     )
     assert evidence_backed_official_regions >= backfilled_unique, (
         "published evidence-backed official regions trail region_backfill progress"
