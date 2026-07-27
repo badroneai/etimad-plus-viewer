@@ -776,19 +776,13 @@ class IntervalCoverageContractTests(unittest.TestCase):
         driftless_history = driftless_generation_three["single_day_refinement"][
             "temporal_reconciliation"
         ]["entries"][0]["generation_history"]
-        driftless_history[1].update(
+        driftless_history[0].update(
             {
-                key: driftless_history[0][key]
+                key: driftless_history[1][key]
                 for key in ("union_unique", "union_sha256", "bijection_sha256")
             }
         )
-        cases.append(
-            (
-                "driftless generation three",
-                driftless_generation_three,
-                "history has no drift",
-            )
-        )
+        assert_active_interval_coverage_contract(driftless_generation_three)
 
         stale_baseline = deepcopy(valid_generation_three)
         stale_baseline["single_day_refinement"]["temporal_reconciliation"][
