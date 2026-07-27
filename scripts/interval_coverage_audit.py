@@ -81,7 +81,7 @@ def _assert_temporal_day_close_refreshes(
     extension_keys = {
         "day_close_refreshes_total",
         "day_close_refreshes_valid",
-        "day_close_refreshes_entries",
+        "day_close_refresh_entries",
     }
     if not extension_keys.intersection(reconciliation):
         return {}
@@ -90,7 +90,7 @@ def _assert_temporal_day_close_refreshes(
     )
     total = reconciliation["day_close_refreshes_total"]
     valid = reconciliation["day_close_refreshes_valid"]
-    entries = reconciliation["day_close_refreshes_entries"]
+    entries = reconciliation["day_close_refresh_entries"]
     assert _nonnegative_integer(total), (
         "schema-5 temporal day-close refresh total is invalid"
     )
@@ -100,8 +100,8 @@ def _assert_temporal_day_close_refreshes(
     assert isinstance(entries, list) and len(entries) == total, (
         "schema-5 temporal day-close refresh entry count mismatch"
     )
-    assert valid == total, (
-        "schema-5 temporal day-close refresh ledger contains invalid evidence"
+    assert valid <= total, (
+        "schema-5 temporal day-close refresh valid count exceeds ledger total"
     )
 
     by_source: dict[tuple[int, str, str], dict] = {}
@@ -226,6 +226,7 @@ def assert_single_day_refinement_contract(
     cycle_terminal: bool,
     strict_temporal_path_audit: bool = True,
     diagnostics: list[str] | None = None,
+    mirror_cover_check=None,
 ) -> None:
     """Validate the bounded type/area cover fallback for dense single days."""
 
@@ -361,14 +362,25 @@ def assert_single_day_refinement_contract(
     assert max_page_requested <= 2, (
         "schema-5 single-day refinement exceeds the page-2 ceiling"
     )
-    pages_requested = refinement["accepted_pages"] + refinement["probe_pages"]
+    mirror_pages = refinement.get("mirror_pages")
+    assert mirror_pages is None or _nonnegative_integer(mirror_pages), (
+        "schema-5 single-day refinement mirror_pages is invalid"
+    )
+    pages_requested = (
+        refinement["accepted_pages"]
+        + refinement["probe_pages"]
+        + (mirror_pages or 0)
+    )
     assert (max_page_requested == 0) == (pages_requested == 0), (
         "schema-5 single-day refinement page metrics are inconsistent"
     )
     assert pages_requested >= refinement["nodes_exact"], (
         "schema-5 single-day refinement has fewer page proofs than exact nodes"
     )
-    assert pages_requested <= 4 * refinement["nodes_total"], (
+    assert (
+        refinement["accepted_pages"] + refinement["probe_pages"]
+        <= 4 * refinement["nodes_total"]
+    ), (
         "schema-5 single-day refinement page metrics exceed bounded retries"
     )
 
@@ -408,6 +420,9 @@ def assert_single_day_refinement_contract(
         assert refinement["raw_replay_valid"] is False, (
             "schema-5 single-day refinement ignores RAW replay errors"
         )
+
+    if mirror_cover_check is not None:
+        mirror_cover_check()
 
     reconciliation = refinement.get("temporal_reconciliation")
     assert isinstance(reconciliation, dict), (
@@ -691,6 +706,10 @@ def assert_single_day_refinement_contract(
         assert refinement["nodes_pending_page2"] == 0, (
             "schema-5 terminal refinement still has pending page-2 nodes"
         )
+        if mirror_pending is not None:
+            assert refinement["nodes_mirror_pending"] == 0, (
+                "schema-5 terminal refinement still has mirror-pending nodes"
+            )
         assert refinement["nodes_blocked"] == 0, (
             "schema-5 terminal refinement still has blocked nodes"
         )

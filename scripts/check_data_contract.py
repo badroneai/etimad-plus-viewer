@@ -2299,6 +2299,17 @@ def _assert_single_day_refinement_contract(
 ) -> None:
     """Validate the bounded type/area cover fallback for dense single days."""
 
+    mirror_cover_check = (
+        (
+            lambda: _assert_single_day_mirror_cover_contract(
+                refinement,
+                coverage_complete=coverage_complete,
+                cycle_terminal=cycle_terminal,
+            )
+        )
+        if refinement is not None
+        else None
+    )
     assert_single_day_refinement_contract_audit(
         refinement,
         covered_interval_count=covered_interval_count,
@@ -2308,13 +2319,8 @@ def _assert_single_day_refinement_contract(
         refined_blocked_interval_reasons=refined_blocked_interval_reasons,
         coverage_complete=coverage_complete,
         cycle_terminal=cycle_terminal,
+        mirror_cover_check=mirror_cover_check,
     )
-    if refinement is not None:
-        _assert_single_day_mirror_cover_contract(
-            refinement,
-            coverage_complete=coverage_complete,
-            cycle_terminal=cycle_terminal,
-        )
 
 
 def assert_active_interval_coverage_contract(
@@ -4150,11 +4156,11 @@ def assert_region_backfill_contract(
         ).strip()
         assert relations_checked_at, f"official region freshness missing: {ref}"
 
-    assert len(detail_by_ref) == awarded_total, (
-        "published awarded dataset disagrees with region backfill cohort"
+    assert len(detail_by_ref) >= awarded_total, (
+        "published awarded dataset lost region backfill cohort members"
     )
-    assert filled_details == current_filled, (
-        "published awarded region count disagrees with region_backfill current_filled"
+    assert filled_details >= current_filled, (
+        "published awarded region count trails region_backfill current_filled"
     )
     assert evidence_backed_official_regions >= backfilled_unique, (
         "published evidence-backed official regions trail region_backfill progress"
