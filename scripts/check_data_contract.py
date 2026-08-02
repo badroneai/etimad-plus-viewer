@@ -2020,13 +2020,16 @@ def assert_active_cardinality_progress_summary(progress: object) -> None:
 
 
 def _assert_single_day_mirror_cover_contract(
-    refinement: dict,
+    refinement: object,
     *,
     coverage_complete: bool,
     cycle_terminal: bool,
 ) -> None:
     """Validate the additive, bounded two-ended cover for dense area leaves."""
 
+    assert isinstance(refinement, dict), (
+        "schema-5 mirror-cover refinement is not a mapping"
+    )
     extension_keys = ("nodes_mirror_pending", "mirror_pages", "mirror_cover")
     extension_presence = [key in refinement for key in extension_keys]
     if not any(extension_presence):
