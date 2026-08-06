@@ -67,7 +67,8 @@ python3 scripts/check_data_contract.py --root .
 يشغّل `.github/workflows/ci.yml` البوابات نفسها لكل pull request إلى `main` من
 دون أي صلاحية أو خطوة نشر. يبقى النشر محصوراً في `.github/workflows/pages.yml`
 من كود `main` المحمي، بينما تصل البيانات الدورية عبر
-`publication/kashaf-data` وإشارة read-only. تغطي اختبارات Chromium التوجيه ولوحة التفاصيل بلوحة
+`publication/kashaf-data`. يفحص selector خفيف الفرق مع الموقع كل عشر دقائق؛
+ولا يشغّل build/deploy عند التطابق. تغطي اختبارات Chromium التوجيه ولوحة التفاصيل بلوحة
 المفاتيح، وحصر التركيز واستعادته، وبطاقات الهاتف، وإعادة المحاولة بعد فشل
 الشبكة، وتفضيل تقليل الحركة.
 

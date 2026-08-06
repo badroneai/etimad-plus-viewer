@@ -9,9 +9,12 @@ repair a presentation or convergence incident.
 
 1. Confirm the official collector has a recent verified snapshot.
 2. If the collector is healthy, inspect the data-only push and publication
-   signal before Pages.
-3. Repair the first failed stage and rerun only that stage where possible.
-4. Close after publication age is at most 12 hours and the live contract passes.
+   branch tip. A missing signal after a deploy-key push is expected in the
+   observed setup; inspect the next protected-main Pages poll instead.
+3. Confirm the scheduled selector ran within its ten-minute target cadence and
+   recorded either `publication_already_live` or a deployment reason.
+4. Repair the first failed stage and rerun only that stage where possible.
+5. Close after publication age is at most 12 hours and the live contract passes.
 
 ## Pages convergence and contract
 

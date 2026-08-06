@@ -22,8 +22,8 @@ Generated Kashaf data is published to `publication/kashaf-data`. The branch star
 from `main` for a compatible first bootstrap and thereafter receives commits whose
 staged paths are limited to `data/`.
 
-A read-only workflow on that branch emits the unprivileged
-`Kashaf data publication signal`. The privileged Pages workflow is activated by
+A read-only workflow on that branch may emit the unprivileged
+`Kashaf data publication signal`. The privileged Pages workflow can be activated by
 `workflow_run`, so GitHub loads it from the default branch. It then:
 
 1. rejects signals from another repository, branch, failed run, or stale branch tip;
@@ -37,6 +37,31 @@ The signal workflow has only `contents: read`. Only the deploy job receives
 `pages: write` and `id-token: write`. The collector deploy key remains write-enabled
 for the viewer repository because GitHub deploy keys cannot be path-scoped, but its
 expected write target is only the publication branch.
+
+## Production correction: trusted polling fallback
+
+Production run `31128644985` pushed publication commit
+`b4866b0d7428c74f387b97d88337740bc7e48e2e`, but that deploy-key push did not
+create a signal workflow run in this repository setup. The signal path therefore
+remains a best-effort fast path, not the availability mechanism.
+
+The protected-main Pages workflow also runs at minutes
+`03,13,23,33,43,53` of every UTC hour. Its lightweight selector:
+
+1. resolves immutable `main` and publication branch SHAs;
+2. fetches the selector script from that exact protected `main` SHA;
+3. fetches `data/manifest.json` from the exact publication SHA and from live Pages;
+4. validates a non-empty `snapshot_id` and compares both snapshot identity and
+   manifest byte SHA-256;
+5. skips all checkout, dependency installation, tests, packaging, and deployment
+   when the live manifest is already exact;
+6. executes the existing expensive verified deployment only when the manifests
+   diverge or the live manifest is unavailable/invalid.
+
+An invalid publication manifest fails the selector closed. A missing publication
+branch is a successful no-op. The ten-minute cadence leaves nominal room for the
+collector's 1,200-second live convergence window without adding a PAT, app, or
+repository secret.
 
 ## Compatibility and migration
 
@@ -62,6 +87,8 @@ rollback, disable the publication signal workflow and manually dispatch Pages fr
 
 - `main` can require pull requests and block direct collector writes.
 - Publication stays automated without adding a PAT, GitHub App, or new secret.
+- Scheduled workflows are best-effort GitHub service timers and can be delayed;
+  ten minutes is the target cadence, not a hard delivery guarantee.
 - A stolen deploy key can corrupt or delete the publication branch and cause
   availability failures, but cannot modify protected source through the supported
   path or replace the privileged deployment workflow.
