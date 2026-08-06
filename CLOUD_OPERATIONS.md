@@ -56,9 +56,12 @@ Etimad visitor API
 6. ينسخ الإسقاط المتحقق إلى checkout فرع النشر، ويتحقق أن staged paths كلها
    تحت `data/`، ثم يدفع commit عاديًا بلا force إلى
    `publication/kashaf-data`.
-7. يشغّل push إشارة read-only. يستجيب لها Workflow Pages المحفوظ على `main`،
-   ويرفض الإشارة القديمة أو الخارجية، ويركب commit البيانات الثابت فوق المصدر
-   المحمي، ثم يعيد كل الاختبارات والعقد قبل artifact وPages.
+7. قد يشغّل push إشارة read-only كمسار سريع، لكن deploy-key push لم يشغّل
+   Actions في دليل الإنتاج. لذلك يفحص Workflow Pages المحفوظ على `main` كل عشر
+   دقائق رأس فرع النشر مقابل manifest الحي. إذا تطابق `snapshot_id` وSHA-256
+   للـmanifest ينتهي selector بلا checkout أو اختبارات أو deploy؛ وإذا اختلفا
+   يركب commit البيانات الثابت فوق المصدر المحمي، ثم يعيد كل الاختبارات والعقد
+   قبل artifact وPages.
 8. يعيد فحص الموقع الحي حتى يطابق `snapshot_id` وتنجح SHA-256 والأحجام والأعداد
    وربط descriptor فهرس الترسيات بكل أجزائه وشظايا التفاصيل.
 
@@ -99,7 +102,9 @@ python3 scripts/check_data_contract.py \
 3. قارن `snapshot_id` في Release و`data/manifest.json` والموقع الحي.
 4. افحص تشغيل Pages في
    <https://github.com/badroneai/etimad-plus-viewer/actions>.
-5. نزّل artifact التشخيصي للتشغيل الرسمي عند الحاجة؛ الـartifact دليل تشخيصي
+5. إذا لم يوجد signal بعد deploy-key push، انتظر poll التالي عند الدقائق
+   `03/13/23/33/43/53` UTC وافحص سبب selector في ملخص التشغيل.
+6. نزّل artifact التشخيصي للتشغيل الرسمي عند الحاجة؛ الـartifact دليل تشخيصي
    وليس مصدر الحالة الدائمة.
 
 لا تعالج التعطل بإعادة الجلب من منصة وسيطة، أو بتشغيل دورة يدوية من جهاز، أو
@@ -110,9 +115,10 @@ python3 scripts/check_data_contract.py \
 - rollback الاعتيادي للبيانات هو commit جديد على
   `publication/kashaf-data` يعيد شجرة `data/` من snapshot متحقق سابق؛ لا
   تستخدم force-push أو حذف تاريخ الفرع.
-- إذا تعطل مسار الإشارة، عطّل `Kashaf data publication signal` مؤقتًا وشغّل
-  `Deploy Kashaf Pages` يدويًا مع `use_main_data=true`. ما دام `main/data`
-  موجودًا يبقى snapshot التوافق قابلًا للبناء.
+- غياب إشارة deploy-key طبيعي في الإعداد المثبت؛ poll المحمي هو fallback
+  الحاكم. إذا تعطل poll أو كان rollback عاجلًا، شغّل `Deploy Kashaf Pages`
+  يدويًا مع `use_main_data=true`. ما دام `main/data` موجودًا يبقى snapshot
+  التوافق قابلًا للبناء.
 - لا تحذف `main/data` قبل نجاح تشغيل مجدول كامل وعقد حي وتمرين rollback.
 - حذف فرع النشر يعيد التشغيل اليدوي/دفع `main` إلى snapshot التوافق، لكنه لا
   يسترجع بيانات أحدث تلقائيًا؛ أعد إنشاء الفرع من commit بيانات متحقق.

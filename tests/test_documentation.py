@@ -103,6 +103,41 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertNotIn("id-token: write", signal)
         self.assertNotIn("secrets.", signal)
 
+    def test_pages_has_a_lightweight_trusted_publication_poll(self):
+        pages = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+
+        for required in (
+            'cron: "3,13,23,33,43,53 * * * *"',
+            "Compare publication tip with live Pages",
+            "timeout-minutes: 3",
+            "scripts/select_pages_publication.py",
+            "--max-time 20",
+            "raw.githubusercontent.com/${REPOSITORY}/${SOURCE_REF}",
+            "--publication-url",
+            "--live-url",
+            "publication=${PUBLICATION_REF}",
+            "poll=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+            'if [[ "${EVENT_NAME}" == "schedule" ]]',
+            'should_deploy="false"',
+            'selection_reason="publication_branch_missing"',
+            "needs.select-revisions.outputs.should_deploy == 'true'",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, pages)
+
+        poll_start = pages.index("Compare publication tip with live Pages")
+        verify_start = pages.index("verify-and-package:")
+        poll = pages[poll_start:verify_start]
+        for expensive in (
+            "npm ci",
+            "playwright install",
+            "unittest discover",
+            "upload-pages-artifact",
+            "deploy-pages",
+        ):
+            with self.subTest(expensive=expensive):
+                self.assertNotIn(expensive, poll)
+
     def test_pr_ci_workflow_is_pinned_and_non_deploying(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         pages = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
