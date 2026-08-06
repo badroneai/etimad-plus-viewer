@@ -11,8 +11,9 @@ verified official SQLite + phase0 lock
   -> export_warehouse.py
   -> data/manifest.json + deterministic JSON assets
   -> local tests and contract
-  -> viewer main
-  -> Pages artifact
+  -> viewer publication/kashaf-data
+  -> read-only publication signal
+  -> protected-main Pages workflow + immutable artifact
   -> browser bootstrap from manifest
 ```
 
@@ -85,6 +86,14 @@ python scripts/check_data_contract.py --root .
 ينفذ عقد مماثل على Pages الحي بهوية snapshot نفسها. نجاح build وحده لا يثبت
 نشر البيانات، لكن تأخر CDN بعد نجاح push وPages يسجل كحالة تقارب معلقة ولا
 يعيد تصنيف جولة الجمع السليمة كفشل مصدر.
+
+كود الواجهة وWorkflow صاحب صلاحية Pages يأتيان من `main`. أما الإسقاط الدوري
+فيأتي من commit ثابت على `publication/kashaf-data` عبر إشارة بلا صلاحية نشر.
+يتحقق Workflow الحاكم من المستودع والفرع ورأس الفرع، ويرفض الروابط الرمزية، ثم
+يركب `data/` فوق المصدر المحمي ويعيد كل البوابات. عند غياب فرع النشر يستعمل
+`main/data` مؤقتًا للتوافق، لذلك لا يغير دمج البنية مسار الإنتاج قبل أول نشر
+بيانات متحقق. القرار والـrollback موثقان في
+[`ADR-0002`](docs/adr/0002-protected-source-and-publication-branch.md).
 
 ## النمو وتاريخ Git
 

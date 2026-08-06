@@ -82,6 +82,27 @@ class DocumentationContractTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, workflow)
 
+    def test_publication_branch_cannot_replace_privileged_pages_workflow(self):
+        pages = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+        signal = (ROOT / ".github/workflows/publication-signal.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('workflow_run:\n    workflows: ["Kashaf data publication signal"]', pages)
+        self.assertIn('branches: ["publication/kashaf-data"]', pages)
+        self.assertIn("permissions: {}", pages)
+        self.assertIn("name: Select trusted source and publication", pages)
+        self.assertIn('SIGNAL_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}', pages)
+        self.assertIn('if [[ -z "${tip}" || "${tip}" != "${SIGNAL_SHA}" ]]', pages)
+        self.assertIn("python scripts/stage_publication_data.py", pages)
+        self.assertIn("permissions:\n      pages: write\n      id-token: write", pages)
+
+        self.assertIn('branches: ["publication/kashaf-data"]', signal)
+        self.assertIn("permissions:\n  contents: read", signal)
+        self.assertNotIn("pages: write", signal)
+        self.assertNotIn("id-token: write", signal)
+        self.assertNotIn("secrets.", signal)
+
     def test_pr_ci_workflow_is_pinned_and_non_deploying(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         pages = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")

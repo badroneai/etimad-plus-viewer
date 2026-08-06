@@ -4,23 +4,127 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      use_main_data:
+        description: Emergency rollback to the compatibility data committed on main
+        required: false
+        default: false
+        type: boolean
+  workflow_run:
+    workflows: ["Kashaf data publication signal"]
+    branches: ["publication/kashaf-data"]
+    types: [completed]
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
+  select-revisions:
+    name: Select trusted source and publication
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      source_ref: ${{ steps.select.outputs.source_ref }}
+      publication_ref: ${{ steps.select.outputs.publication_ref }}
+      use_publication: ${{ steps.select.outputs.use_publication }}
+      should_deploy: ${{ steps.select.outputs.should_deploy }}
+    steps:
+      - name: Select immutable revisions
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          USE_MAIN_DATA: ${{ inputs.use_main_data || false }}
+          PUSH_SHA: ${{ github.sha }}
+          SIGNAL_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SIGNAL_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SIGNAL_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SIGNAL_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          remote="https://github.com/${REPOSITORY}.git"
+          source_ref="$(git ls-remote "${remote}" refs/heads/main | awk '{print $1}')"
+          if [[ -z "${source_ref}" ]]; then
+            echo "Unable to resolve protected main." >&2
+            exit 1
+          fi
+          publication_ref=""
+          use_publication="false"
+          should_deploy="true"
+
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            source_ref="${PUSH_SHA}"
+          fi
+
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            if [[ "${SIGNAL_CONCLUSION}" != "success" \
+              || "${SIGNAL_BRANCH}" != "publication/kashaf-data" \
+              || "${SIGNAL_REPOSITORY}" != "${REPOSITORY}" ]]; then
+              should_deploy="false"
+            else
+              tip="$(git ls-remote "${remote}" refs/heads/publication/kashaf-data | awk '{print $1}')"
+              if [[ -z "${tip}" || "${tip}" != "${SIGNAL_SHA}" ]]; then
+                echo "A newer publication superseded ${SIGNAL_SHA}; skipping stale deployment."
+                should_deploy="false"
+              else
+                publication_ref="${SIGNAL_SHA}"
+                use_publication="true"
+              fi
+            fi
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && "${USE_MAIN_DATA}" == "true" ]]; then
+            echo "Emergency compatibility rollback selected; packaging main/data."
+          else
+            publication_ref="$(
+              git ls-remote "${remote}" refs/heads/publication/kashaf-data | awk '{print $1}'
+            )"
+            if [[ -n "${publication_ref}" ]]; then
+              use_publication="true"
+            else
+              echo "Publication branch is not initialized; retaining main/data compatibility."
+            fi
+          fi
+
+          {
+            echo "source_ref=${source_ref}"
+            echo "publication_ref=${publication_ref}"
+            echo "use_publication=${use_publication}"
+            echo "should_deploy=${should_deploy}"
+          } >> "${GITHUB_OUTPUT}"
+
   verify-and-package:
+    name: Verify and package Kashaf
+    needs: select-revisions
+    if: needs.select-revisions.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - name: Check out the canonical snapshot
+      - name: Check out protected source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.select-revisions.outputs.source_ref }}
+          persist-credentials: false
+
+      - name: Check out immutable publication data
+        if: needs.select-revisions.outputs.use_publication == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.select-revisions.outputs.publication_ref }}
+          path: _publication
+          persist-credentials: false
+
+      - name: Stage publication data over protected source
+        if: needs.select-revisions.outputs.use_publication == 'true'
+        run: |
+          python scripts/stage_publication_data.py \
+            --publication-root _publication \
+            --destination data
+          rm -rf _publication
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -77,9 +181,13 @@ jobs:
           path: _site
 
   deploy:
-    needs: verify-and-package
+    name: Deploy Kashaf Pages
+    needs: [select-revisions, verify-and-package]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
