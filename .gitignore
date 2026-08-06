@@ -7,3 +7,5 @@ node_modules/
 __pycache__/
 *.pyc
 .playwright-cli/
+playwright-report/
+test-results/

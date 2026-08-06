@@ -48,7 +48,9 @@ verified official SQLite + phase0 lock
 - حالة المستكشف القابلة للمشاركة تحفظ dataset والبحث والفلاتر والصفحة داخل
   `location.hash` من دون إلغاء مسار `#t/<ref>`.
 - عند إغلاق modal يعود التركيز إلى العنصر الذي فتحه، ويبقى التركيز محصورًا
-  داخل modal أثناء فتحه.
+  داخل modal أثناء فتحه، وتصبح طبقة الصفحة الخلفية `inert` حتى الإغلاق.
+- بطاقات الهاتف قابلة للتفعيل بالنقر أو `Enter`/`Space`، وتعلن حالة التنقل
+  الحالية وحالة اختيار مجموعات البيانات عبر سمات ARIA أصلية.
 
 ## حدود المسؤولية في المتصفح
 
@@ -58,6 +60,10 @@ verified official SQLite + phase0 lock
   للفهم عند الفشل.
 - `loadAwardedDetail` يحمل شظية واحدة content-addressed ويتحقق من وجود المرجع.
 - أخطاء الشبكة لا تتحول إلى جدول فارغ صامت؛ تظهر للمستخدم وتبقى قابلة للاختبار.
+- فشل manifest أو dataset يعرض رسالة عربية وزر إعادة محاولة حقيقيًا من دون
+  إعادة تحميل الصفحة، ويرفض الإقلاع manifest ناقص البنية.
+- حالات التحميل معلنة بـ`aria-busy`، وتُعطّل الحركة الزخرفية عند
+  `prefers-reduced-motion: reduce`.
 
 ## بوابات النشر
 
@@ -67,8 +73,14 @@ python -m ruff check .
 python -m mypy .
 node --check assets/app.js
 node --test tests/test_app.cjs
+npm ci
+npx playwright install chromium
+npm run test:e2e
 python scripts/check_data_contract.py --root .
 ```
+
+تشغّل بوابة Chromium خادم HTTP ثابتًا محليًا وتختبر سلوك لوحة المفاتيح
+والتركيز وإعادة المحاولة وتقليل الحركة ضد artifact نفسه الذي تنشره Pages.
 
 ينفذ عقد مماثل على Pages الحي بهوية snapshot نفسها. نجاح build وحده لا يثبت
 نشر البيانات، لكن تأخر CDN بعد نجاح push وPages يسجل كحالة تقارب معلقة ولا

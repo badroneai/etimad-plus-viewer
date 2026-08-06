@@ -186,6 +186,7 @@
     currentRows: [],
     detailReturnHash: "",
     focusBeforeDetail: null,
+    retryAction: null,
   };
 
   const el = HAS_DOM ? {
@@ -205,6 +206,13 @@
     cardList: document.getElementById("cardList"),
     pager: document.getElementById("pager"),
     explorerError: document.getElementById("explorerError"),
+    explorerErrorText: document.getElementById("explorerErrorText"),
+    retryDataset: document.getElementById("retryDataset"),
+    appError: document.getElementById("appError"),
+    appErrorText: document.getElementById("appErrorText"),
+    retryBoot: document.getElementById("retryBoot"),
+    tableWrap: document.getElementById("tableWrap"),
+    skipLink: document.getElementById("skipLink"),
     detailRoot: document.getElementById("detailRoot"),
     detailRef: document.getElementById("detailRef"),
     detailTitle: document.getElementById("detailTitle"),
@@ -279,23 +287,57 @@
 
   function clearExplorerError() {
     if (!el.explorerError) return;
-    el.explorerError.textContent = "";
+    if (el.explorerErrorText) el.explorerErrorText.textContent = "";
     el.explorerError.hidden = true;
+    state.retryAction = null;
   }
 
-  function showExplorerError(message) {
+  function showExplorerError(message, retryAction = null) {
     const text = String(message || "تعذر إكمال العملية. حاول مرة أخرى.");
     if (el.explorerError) {
-      el.explorerError.textContent = text;
+      if (el.explorerErrorText) el.explorerErrorText.textContent = text;
       el.explorerError.hidden = false;
     }
+    state.retryAction = typeof retryAction === "function" ? retryAction : null;
+    if (el.retryDataset) el.retryDataset.hidden = !state.retryAction;
     if (el.setMeta) el.setMeta.textContent = text;
     if (el.gridBody) {
       el.gridBody.innerHTML = `<tr><td role="alert">${esc(text)}</td></tr>`;
     }
     if (el.cardList) {
-      el.cardList.innerHTML = `<p class="explorer-error" role="alert">${esc(text)}</p>`;
+      el.cardList.innerHTML = `<p class="empty-hint">${esc(text)}</p>`;
     }
+    setExplorerBusy(false);
+  }
+
+  function setExplorerBusy(busy) {
+    const value = busy ? "true" : "false";
+    if (el.tableWrap) el.tableWrap.setAttribute("aria-busy", value);
+    if (el.cardList) el.cardList.setAttribute("aria-busy", value);
+  }
+
+  function showAppError(message) {
+    const text = String(message || "تعذر تشغيل كشاف. حاول مرة أخرى.");
+    if (el.appErrorText) el.appErrorText.textContent = text;
+    if (el.appError) el.appError.hidden = false;
+  }
+
+  function clearAppError() {
+    if (el.appErrorText) el.appErrorText.textContent = "";
+    if (el.appError) el.appError.hidden = true;
+  }
+
+  function validateManifest(manifest) {
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+      throw new Error("بيان البيانات ليس كائناً صالحاً");
+    }
+    if (!Array.isArray(manifest.datasets)) {
+      throw new Error("بيان البيانات لا يحتوي قائمة مجموعات صالحة");
+    }
+    if (!manifest.assets || typeof manifest.assets !== "object" || Array.isArray(manifest.assets)) {
+      throw new Error("بيان البيانات لا يحتوي فهرس أصول صالحاً");
+    }
+    return manifest;
   }
 
   function errorText(err) {
@@ -385,7 +427,7 @@
       const wrapped = new Error(`تعذر تحميل تفاصيل المنافسة ${ref}. ${errorText(err)}`);
       if (err instanceof Error) wrapped.cause = err;
       wrapped.reportedToExplorer = true;
-      showExplorerError(wrapped.message);
+      showExplorerError(wrapped.message, () => openByRef(ref));
       throw wrapped;
     }
   }
@@ -634,9 +676,9 @@
   function renderGroupTabs() {
     el.groupTabs.innerHTML = GROUPS.map(
       (g) =>
-        `<button type="button" class="tab ${state.group === g.id ? "on" : ""}" data-group="${g.id}">${esc(
-          g.title
-        )}</button>`
+        `<button type="button" class="tab ${state.group === g.id ? "on" : ""}" data-group="${
+          g.id
+        }" aria-pressed="${state.group === g.id}">${esc(g.title)}</button>`
     ).join("");
   }
 
@@ -645,7 +687,9 @@
     el.datasetTabs.innerHTML = sets
       .map(
         (d) =>
-          `<button type="button" class="chip ${state.datasetId === d.id ? "on" : ""}" data-set="${d.id}">
+          `<button type="button" class="chip ${
+            state.datasetId === d.id ? "on" : ""
+          }" data-set="${d.id}" aria-pressed="${state.datasetId === d.id}">
             ${esc(d.title)}${d.count != null ? ` <em>${fmt(d.count)}</em>` : ""}
           </button>`
       )
@@ -773,7 +817,12 @@
 
     const refAttr = isTender ? ` data-ref="${esc(row.ref)}"` : "";
     const cta = isTender ? `<span class="m-cta">عرض التفاصيل</span>` : "";
-    return `<article class="m-card${isTender ? " is-tender" : ""}"${refAttr}>
+    const interaction = isTender
+      ? ` role="button" tabindex="0" aria-label="عرض تفاصيل ${esc(
+          row.name_ar || row.name || row.ref
+        )}"`
+      : "";
+    return `<article class="m-card${isTender ? " is-tender" : ""}"${refAttr}${interaction}>
       <div class="m-card-main">${title}</div>
       <div class="m-card-fields">${meta}</div>
       ${cta}
@@ -993,6 +1042,7 @@
       metaLine += ` · ${fmt(arCount)} اسم إنجليزي مُعرَّب`;
     }
     el.setMeta.textContent = metaLine;
+    setExplorerBusy(false);
     clearExplorerError();
     syncExplorerHash();
   }
@@ -1253,6 +1303,7 @@
     el.detailRoot.classList.add("is-open");
     el.detailRoot.setAttribute("aria-hidden", "false");
     document.body.classList.add("detail-open");
+    setPageInert(true);
     const panel = el.detailRoot.querySelector(".detail-panel");
     if (panel) panel.scrollTop = 0;
     if (!location.hash.startsWith("#t/")) state.detailReturnHash = buildExplorerHash();
@@ -1267,6 +1318,7 @@
     el.detailRoot.classList.remove("is-open");
     el.detailRoot.setAttribute("aria-hidden", "true");
     document.body.classList.remove("detail-open");
+    setPageInert(false);
     if (updateHash && location.hash.startsWith("#t/")) {
       history.replaceState(null, "", state.detailReturnHash || buildExplorerHash());
     }
@@ -1279,6 +1331,7 @@
     if (!ref) return;
     clearExplorerError();
     const key = String(ref);
+    if (el.setMeta) el.setMeta.textContent = `جاري تحميل تفاصيل المرجع ${key}…`;
     try {
       let row = state.byRef.get(key);
       if (row?._detailShard && !row._detailComplete) {
@@ -1306,14 +1359,17 @@
         row = await loadAwardedDetail(key, row);
       }
       if (!row) {
-        showExplorerError(`لم يُعثر على المنافسة ذات المرجع ${key} في اللقطة الحالية.`);
+        showExplorerError(
+          `لم يُعثر على المنافسة ذات المرجع ${key} في اللقطة الحالية.`,
+          () => openByRef(key)
+        );
         return null;
       }
       openDetail(row);
       return row;
     } catch (err) {
       if (!err?.reportedToExplorer) {
-        showExplorerError(`تعذر فتح المرجع ${key}. ${errorText(err)}`);
+        showExplorerError(`تعذر فتح المرجع ${key}. ${errorText(err)}`, () => openByRef(key));
       }
       return null;
     }
@@ -1322,6 +1378,7 @@
   function trapDetailFocus(event) {
     if (event.key !== "Tab" || !el.detailRoot?.classList.contains("is-open")) return;
     const panel = el.detailRoot.querySelector(".detail-panel");
+    if (!panel) return;
     const focusable = [
       ...panel.querySelectorAll(
         'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -1346,6 +1403,19 @@
     }
   }
 
+  function setPageInert(inert) {
+    if (!HAS_DOM) return;
+    document
+      .querySelectorAll(".app-bar, .view, .mobile-dock, .footer, .app-error, .skip-link")
+      .forEach((node) => {
+        node.inert = inert;
+      });
+  }
+
+  function isActivationKey(event) {
+    return event.key === "Enter" || event.key === " ";
+  }
+
   function showView(view, { updateHash = true } = {}) {
     if (!VIEWS.includes(view)) view = "home";
     state.view = view;
@@ -1356,10 +1426,14 @@
       else node.setAttribute("hidden", "");
     });
     document.querySelectorAll("[data-nav]").forEach((link) => {
-      link.classList.toggle("is-active", link.getAttribute("data-nav") === view);
+      const active = link.getAttribute("data-nav") === view;
+      link.classList.toggle("is-active", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
     });
     const footer = document.getElementById("siteFooter");
     if (footer) footer.hidden = view !== "home";
+    if (el.skipLink) el.skipLink.href = `#view-${view}`;
 
     if (updateHash && !location.hash.startsWith("#t/")) {
       const next = view === "explorer" ? buildExplorerHash() : `#${view}`;
@@ -1410,6 +1484,7 @@
     renderDatasetTabs();
     clearExplorerError();
     if (updateHash) syncExplorerHash();
+    setExplorerBusy(true);
     el.gridBody.innerHTML = `<tr><td>جاري التحميل…</td></tr>`;
     if (el.cardList) el.cardList.innerHTML = `<p class="empty-hint">جاري التحميل…</p>`;
     try {
@@ -1419,7 +1494,10 @@
       state.explorerReady = true;
       if (updateHash) syncExplorerHash();
     } catch (err) {
-      showExplorerError(`تعذر تحميل مجموعة «${ds.title}». ${errorText(err)}`);
+      showExplorerError(
+        `تعذر تحميل مجموعة «${ds.title}». ${errorText(err)}`,
+        () => selectDataset(id, { navigate: false, resetState: false })
+      );
       if (updateHash) syncExplorerHash();
     }
   }
@@ -1523,13 +1601,28 @@
     };
     el.gridBody.addEventListener("click", openFromRef);
     el.cardList?.addEventListener("click", openFromRef);
+    el.cardList?.addEventListener("keydown", (e) => {
+      if (!isActivationKey(e)) return;
+      const hit = e.target.closest('[role="button"][data-ref]');
+      if (!hit) return;
+      e.preventDefault();
+      openByRef(hit.getAttribute("data-ref"));
+    });
 
     el.detailClose.addEventListener("click", closeDetail);
     el.detailBackdrop.addEventListener("click", closeDetail);
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeDetail();
-      else trapDetailFocus(e);
+      if (e.key === "Escape" && el.detailRoot.classList.contains("is-open")) {
+        e.preventDefault();
+        closeDetail();
+      } else trapDetailFocus(e);
     });
+
+    el.retryDataset?.addEventListener("click", () => {
+      const retry = state.retryAction;
+      if (retry) retry();
+    });
+    el.retryBoot?.addEventListener("click", startApplication);
 
     el.copyRef.addEventListener("click", async () => {
       const text = el.detailRef.textContent.replace(/^المرجع\s*/, "");
@@ -1540,21 +1633,32 @@
           el.copyRef.textContent = "نسخ المرجع";
         }, 1200);
       } catch {
-        /* ignore */
+        el.copyRef.textContent = "تعذر النسخ";
+        setTimeout(() => {
+          el.copyRef.textContent = "نسخ المرجع";
+        }, 1200);
       }
     });
   }
 
-  async function boot() {
-    bind();
-    showView("home", { updateHash: false });
+  async function startApplication() {
+    clearAppError();
     try {
-      state.manifest = await loadJSON("manifest.json", "البيان");
+      delete state.cache["manifest.json"];
+      state.manifest = validateManifest(await loadJSON("manifest.json", "البيان"));
       renderInventory();
       await routeFromHash();
     } catch (err) {
-      if (el.metaLine) el.metaLine.textContent = `تعذر الإقلاع: ${err.message || err}`;
+      const message = `تعذر الإقلاع: ${errorText(err)}`;
+      if (el.metaLine) el.metaLine.textContent = message;
+      showAppError(message);
     }
+  }
+
+  function boot() {
+    bind();
+    showView("home", { updateHash: false });
+    startApplication();
   }
 
   const testApi = {
@@ -1562,6 +1666,7 @@
     computedShard,
     contentAddressedUrl,
     filterRows,
+    isActivationKey,
     loadAwardedDetail,
     loadDatasetPayload,
     isStillMissing,
@@ -1569,6 +1674,7 @@
     prepareSearchRows,
     progressiveParts,
     state,
+    validateManifest,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = testApi;
   if (HAS_DOM) boot();

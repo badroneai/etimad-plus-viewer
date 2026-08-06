@@ -76,6 +76,8 @@ class DocumentationContractTests(unittest.TestCase):
             "python -m mypy",
             "node --check assets/app.js",
             "node --test tests/test_app.cjs",
+            "npm ci",
+            "npm run test:e2e",
         ):
             with self.subTest(command=command):
                 self.assertIn(command, workflow)
@@ -100,6 +102,9 @@ class DocumentationContractTests(unittest.TestCase):
             "python -m unittest discover -s tests -v",
             "node --check assets/app.js",
             "node --test tests/test_app.cjs",
+            "npm ci",
+            "npx playwright install --with-deps chromium",
+            "npm run test:e2e",
             "python scripts/check_data_contract.py --root .",
         ):
             with self.subTest(required=required):
@@ -118,7 +123,7 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertNotIn(forbidden, ci)
 
         action_pattern = re.compile(
-            r"uses: (actions/(?:checkout|setup-python))@([0-9a-f]{40})"
+            r"uses: (actions/(?:checkout|setup-python|setup-node))@([0-9a-f]{40})"
         )
         ci_actions = dict(action_pattern.findall(ci))
         pages_actions = dict(action_pattern.findall(pages))
@@ -127,6 +132,7 @@ class DocumentationContractTests(unittest.TestCase):
             {
                 "actions/checkout": pages_actions["actions/checkout"],
                 "actions/setup-python": pages_actions["actions/setup-python"],
+                "actions/setup-node": pages_actions["actions/setup-node"],
             },
         )
 
@@ -144,6 +150,9 @@ class DocumentationContractTests(unittest.TestCase):
             "python3 -m unittest discover -s tests -v",
             "node --check assets/app.js",
             "node --test tests/test_app.cjs",
+            "npm ci",
+            "npx playwright install chromium",
+            "npm run test:e2e",
             "python3 scripts/check_data_contract.py --root .",
             ".github/workflows/ci.yml",
             ".github/workflows/pages.yml",
