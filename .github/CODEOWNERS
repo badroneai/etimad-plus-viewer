@@ -1,0 +1,5 @@
+# Repository-wide ownership. Keep governance and licensing changes under explicit review.
+* @badroneai
+/.github/ @badroneai
+/LICENSE @badroneai
+/SECURITY.md @badroneai
