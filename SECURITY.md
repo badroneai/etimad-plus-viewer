@@ -2,8 +2,8 @@
 
 ## Supported version
 
-This is a private, continuously operated repository. Security fixes are made only
-on the latest revision of `main`; older commits, branches, and published
+This is a proprietary, continuously operated repository. Security fixes are made
+only on the latest revision of `main`; older commits, branches, and published
 artifacts are not supported independently.
 
 ## Report a vulnerability privately
