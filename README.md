@@ -66,7 +66,8 @@ python3 scripts/check_data_contract.py --root .
 
 يشغّل `.github/workflows/ci.yml` البوابات نفسها لكل pull request إلى `main` من
 دون أي صلاحية أو خطوة نشر. يبقى النشر محصوراً في `.github/workflows/pages.yml`
-بعد الدمج إلى `main`. تغطي اختبارات Chromium التوجيه ولوحة التفاصيل بلوحة
+من كود `main` المحمي، بينما تصل البيانات الدورية عبر
+`publication/kashaf-data` وإشارة read-only. تغطي اختبارات Chromium التوجيه ولوحة التفاصيل بلوحة
 المفاتيح، وحصر التركيز واستعادته، وبطاقات الهاتف، وإعادة المحاولة بعد فشل
 الشبكة، وتفضيل تقليل الحركة.
 
@@ -80,6 +81,8 @@ python3 scripts/check_data_contract.py \
 ```
 
 النشر يتم عبر `.github/workflows/pages.yml` من artifact ثابت لا عبر legacy branch build، ولا يبدأ قبل نجاح الاختبارات وفحص JavaScript وعقد البيانات المحلي.
+تفاصيل فصل صلاحيات المصدر عن البيانات، ترتيب الترحيل، وrollback موثقة في
+[`ADR-0002`](docs/adr/0002-protected-source-and-publication-branch.md).
 
 ## تشغيل محلي
 

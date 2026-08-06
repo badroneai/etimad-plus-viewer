@@ -18,7 +18,8 @@ Etimad visitor API
   -> official-periodic GitHub Actions
   -> verified Release snapshot
   -> Kashaf projection + local contract
-  -> atomic push to viewer main
+  -> data-only push to publication/kashaf-data
+  -> trusted main workflow
   -> Pages artifact + live contract
 ```
 
@@ -47,18 +48,25 @@ Etimad visitor API
 1. يستعيد أحدث لقطة صالحة بعد فحص SHA-256 وسلامة الاستخراج وSQLite وكل RAW.
 2. يجلب دورة محدودة من اعتماد الرسمية ويحفظ الاستجابات RAW قبل parsing.
 3. يبني لقطة تراكمية جديدة وينشر الأرشيف ثم manifest بصورة ذرية.
-4. ينسخ هذا المستودع بمفتاح نشر محدود، ثم يشغّل `export_warehouse.py` على
-   قاعدة الحالة الرسمية مع قفل المرحلة 0 وهوية اللقطة.
+4. ينسخ `main` للـexporter والاختبارات، وينسخ
+   `publication/kashaf-data` منفصلًا بمفتاح النشر المحدود. عند أول تشغيل فقط
+   ينشئ فرع النشر من `main`.
 5. يشغّل الاختبارات وفحص JavaScript وعقد البيانات المحلي. عند فشل أي بوابة لا
    يدفع بيانات جديدة، وتبقى آخر نسخة سليمة منشورة.
-6. يدفع تغييرات `data/` إلى `main`. يبني Workflow هذا المستودع artifact ثابتًا
-   وينشره على Pages.
-7. يعيد فحص الموقع الحي حتى يطابق `snapshot_id` وتنجح SHA-256 والأحجام والأعداد
+6. ينسخ الإسقاط المتحقق إلى checkout فرع النشر، ويتحقق أن staged paths كلها
+   تحت `data/`، ثم يدفع commit عاديًا بلا force إلى
+   `publication/kashaf-data`.
+7. يشغّل push إشارة read-only. يستجيب لها Workflow Pages المحفوظ على `main`،
+   ويرفض الإشارة القديمة أو الخارجية، ويركب commit البيانات الثابت فوق المصدر
+   المحمي، ثم يعيد كل الاختبارات والعقد قبل artifact وPages.
+8. يعيد فحص الموقع الحي حتى يطابق `snapshot_id` وتنجح SHA-256 والأحجام والأعداد
    وربط descriptor فهرس الترسيات بكل أجزائه وشظايا التفاصيل.
 
 يمنع `concurrency` كاتبين متزامنين. يستخدم الجلب `GITHUB_TOKEN` داخل مستودعه،
 ويستخدم النشر السر `KASHAF_DEPLOY_KEY` المقيد بهذا المستودع فقط، مع مفتاح مضيف
-GitHub مثبت في Workflow.
+GitHub مثبت في Workflow. يبقى المفتاح قادرًا تقنيًا على الكتابة في المستودع
+لأن deploy keys لا تدعم path scope؛ الحماية الحاكمة هي منع الكتابة المباشرة إلى
+`main` وقصر مسار النشر المقبول على فرع البيانات وعقد Pages.
 
 ## التحقق والتشخيص
 
@@ -96,6 +104,18 @@ python3 scripts/check_data_contract.py \
 
 لا تعالج التعطل بإعادة الجلب من منصة وسيطة، أو بتشغيل دورة يدوية من جهاز، أو
 بتجاوز بوابة المصدر. أصلح مرحلة السلسلة التي فشلت ثم أعد تشغيل Workflow الرسمي.
+
+## Rollback وفصل الفروع
+
+- rollback الاعتيادي للبيانات هو commit جديد على
+  `publication/kashaf-data` يعيد شجرة `data/` من snapshot متحقق سابق؛ لا
+  تستخدم force-push أو حذف تاريخ الفرع.
+- إذا تعطل مسار الإشارة، عطّل `Kashaf data publication signal` مؤقتًا وشغّل
+  `Deploy Kashaf Pages` يدويًا مع `use_main_data=true`. ما دام `main/data`
+  موجودًا يبقى snapshot التوافق قابلًا للبناء.
+- لا تحذف `main/data` قبل نجاح تشغيل مجدول كامل وعقد حي وتمرين rollback.
+- حذف فرع النشر يعيد التشغيل اليدوي/دفع `main` إلى snapshot التوافق، لكنه لا
+  يسترجع بيانات أحدث تلقائيًا؛ أعد إنشاء الفرع من commit بيانات متحقق.
 
 ## التصدير اليدوي الاستثنائي
 

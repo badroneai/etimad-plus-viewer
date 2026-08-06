@@ -51,7 +51,12 @@ The existing 64 `awarded_details` shards do not change. Therefore `#t/<ref>`
 continues to compute and fetch the detail shard directly; it does not depend on
 loading any or all searchable-index parts.
 
-## Decision: quarterly orphan publication branches
+## Superseded plan: quarterly orphan publication branches
+
+ADR-0002 supersedes the immediate publication design below with a non-orphan
+`publication/kashaf-data` branch and a trusted default-branch deployment workflow.
+Quarterly orphan rotation remains deferred until a separate trusted pointer and
+retention mechanism is reviewed.
 
 Generated data history will move off the source-code branch to a dedicated
 publication branch. At the start of each calendar quarter the publisher will:
@@ -85,9 +90,8 @@ objects as the authoritative data archive.
   independently cacheable, and can be fetched concurrently or progressively.
 - Changing the part count or assignment algorithm is a contract migration and
   requires another schema/format decision; it cannot be changed silently.
-- Publication-branch rotation is a later pipeline migration. Until it is
-  implemented, this ADR is the governing strategy and generated data continues
-  to use the current branch workflow.
+- Publication separation is implemented by ADR-0002. Quarterly orphan rotation is
+  still deferred and must not be introduced automatically by the collector.
 
 ## Rejected alternatives
 
