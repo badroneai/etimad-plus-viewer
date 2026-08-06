@@ -96,6 +96,8 @@ python3 -m http.server 8080
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): بنية الإسقاط والواجهة وعقد الأصول.
 - [CLOUD_OPERATIONS.md](CLOUD_OPERATIONS.md): دورة النشر والتحقق والتشخيص.
+- [OBSERVABILITY.md](OBSERVABILITY.md): أهداف الخدمة ومسار التنبيه الآلي.
+- [INCIDENT_PLAYBOOK.md](INCIDENT_PLAYBOOK.md): إجراءات حوادث النشر والتقارب.
 - [LANGUAGE_POLICY.md](LANGUAGE_POLICY.md): العربية للمنتج والتشغيل والإنجليزية للكود.
 - [CHANGELOG.md](CHANGELOG.md): سجل التغييرات المؤثرة.
 - [SECURITY.md](SECURITY.md): الإبلاغ الخاص عن الثغرات ونطاق الدعم.
