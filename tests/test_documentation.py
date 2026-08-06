@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
@@ -70,6 +71,7 @@ class DocumentationContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         for command in (
+            "python -m pip install -r requirements-dev.txt",
             "python -m ruff check .",
             "python -m mypy",
             "node --check assets/app.js",
@@ -77,6 +79,77 @@ class DocumentationContractTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, workflow)
+
+    def test_pr_ci_workflow_is_pinned_and_non_deploying(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        pages = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+
+        for required in (
+            "on:\n  pull_request:\n    branches: [main]\n"
+            "  workflow_dispatch:\n\npermissions:",
+            "permissions:\n  contents: read\n\nconcurrency:",
+            "concurrency:\n"
+            "  group: pr-ci-${{ github.workflow }}-${{ github.ref }}\n"
+            "  cancel-in-progress: true\n\njobs:",
+            "name: Kashaf quality gates",
+            "runs-on: ubuntu-24.04",
+            'python-version: "3.12"',
+            "python -m pip install -r requirements-dev.txt",
+            "python -m ruff check .",
+            "python -m mypy",
+            "python -m unittest discover -s tests -v",
+            "node --check assets/app.js",
+            "node --test tests/test_app.cjs",
+            "python scripts/check_data_contract.py --root .",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, ci)
+
+        for forbidden in (
+            "actions/configure-pages",
+            "actions/upload-pages-artifact",
+            "actions/deploy-pages",
+            "pages: write",
+            "id-token: write",
+            "\n  push:",
+            "environment:",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, ci)
+
+        action_pattern = re.compile(
+            r"uses: (actions/(?:checkout|setup-python))@([0-9a-f]{40})"
+        )
+        ci_actions = dict(action_pattern.findall(ci))
+        pages_actions = dict(action_pattern.findall(pages))
+        self.assertEqual(
+            ci_actions,
+            {
+                "actions/checkout": pages_actions["actions/checkout"],
+                "actions/setup-python": pages_actions["actions/setup-python"],
+            },
+        )
+
+    def test_quality_gate_dependencies_and_readme_commands_are_governed(self):
+        requirements = (ROOT / "requirements-dev.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(requirements, ["ruff==0.15.22", "mypy==2.3.0"])
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for required in (
+            "python3 -m pip install -r requirements-dev.txt",
+            "python3 -m ruff check .",
+            "python3 -m mypy",
+            "python3 -m unittest discover -s tests -v",
+            "node --check assets/app.js",
+            "node --test tests/test_app.cjs",
+            "python3 scripts/check_data_contract.py --root .",
+            ".github/workflows/ci.yml",
+            ".github/workflows/pages.yml",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, readme)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install pinned quality gates
-        run: python -m pip install ruff==0.15.22 mypy==2.3.0
+        run: python -m pip install -r requirements-dev.txt
 
       - name: Enforce Ruff quality gate
         run: python -m ruff check .
