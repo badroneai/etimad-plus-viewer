@@ -26,8 +26,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+
       - name: Install pinned quality gates
         run: python -m pip install -r requirements-dev.txt
+
+      - name: Install pinned browser test dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
 
       - name: Enforce Ruff quality gate
         run: python -m ruff check .
@@ -43,6 +54,9 @@ jobs:
 
       - name: Verify browser behavior
         run: node --test tests/test_app.cjs
+
+      - name: Verify end-to-end browser behavior
+        run: npm run test:e2e
 
       - name: Verify local static-data contract
         run: python scripts/check_data_contract.py --root .

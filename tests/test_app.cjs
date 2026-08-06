@@ -200,12 +200,32 @@ test("progressive index descriptors resolve deterministic part paths", () => {
   );
 });
 
+test("manifest validation fails closed before rendering malformed runtime data", () => {
+  const valid = { datasets: [], assets: {} };
+  assert.equal(app.validateManifest(valid), valid);
+  assert.throws(() => app.validateManifest(null), /ليس كائناً صالحاً/);
+  assert.throws(() => app.validateManifest({ assets: {} }), /قائمة مجموعات/);
+  assert.throws(() => app.validateManifest({ datasets: [], assets: [] }), /فهرس أصول/);
+});
+
+test("keyboard activation is limited to Enter and Space", () => {
+  assert.equal(app.isActivationKey({ key: "Enter" }), true);
+  assert.equal(app.isActivationKey({ key: " " }), true);
+  assert.equal(app.isActivationKey({ key: "Tab" }), false);
+  assert.equal(app.isActivationKey({ key: "Escape" }), false);
+});
+
 test("accessibility and caching regressions stay absent from the shipped source", () => {
   const root = path.resolve(__dirname, "..");
   const source = fs.readFileSync(path.join(root, "assets/app.js"), "utf8");
   const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(root, "assets/styles.css"), "utf8");
   assert.doesNotMatch(source, /cache:\s*["']no-store["']/);
   assert.match(source, /<th scope="col">/);
   assert.match(html, /id="search"[^>]+aria-label=/);
-  assert.match(html, /role="dialog"[^>]+tabindex="-1"/);
+  assert.match(html, /role="dialog"[^>]+aria-describedby="detailSub"[^>]+tabindex="-1"/);
+  assert.match(html, /id="appError" role="alert"/);
+  assert.match(html, /id="setMeta" role="status" aria-live="polite"/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(css, /:focus-visible/);
 });

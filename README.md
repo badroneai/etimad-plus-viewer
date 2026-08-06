@@ -58,12 +58,17 @@ python3 -m mypy
 python3 -m unittest discover -s tests -v
 node --check assets/app.js
 node --test tests/test_app.cjs
+npm ci
+npx playwright install chromium
+npm run test:e2e
 python3 scripts/check_data_contract.py --root .
 ```
 
 يشغّل `.github/workflows/ci.yml` البوابات نفسها لكل pull request إلى `main` من
 دون أي صلاحية أو خطوة نشر. يبقى النشر محصوراً في `.github/workflows/pages.yml`
-بعد الدمج إلى `main`.
+بعد الدمج إلى `main`. تغطي اختبارات Chromium التوجيه ولوحة التفاصيل بلوحة
+المفاتيح، وحصر التركيز واستعادته، وبطاقات الهاتف، وإعادة المحاولة بعد فشل
+الشبكة، وتفضيل تقليل الحركة.
 
 وبعد نشر GitHub Pages، يتحقق الأمر التالي من اللقطة وكل أصل مذكور فيها: JSON والحجم وSHA-256 والعدد وربط فهرس awarded بكل الشاردات. عند تأخر CDN يعيد الأصول الفاشلة فقط لتفادي إعادة تنزيل اللقطة كاملة:
 

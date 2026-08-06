@@ -1,0 +1,25 @@
+{
+  "name": "etimad-plus-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "واجهة عربية ثابتة تدمج خط الأساس التاريخي مع أحدث حقول الجلب الدوري من منصة اعتماد الرسمية. الحقول الرسمية غير الفارغة تتقدم، بينما تبقى عروض وترسيات خط الأساس محفوظة إلى أن تصبح النتيجة الرسمية مكتملة.",
+  "scripts": {
+    "test": "node --test tests/test_app.cjs",
+    "test:e2e": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/badroneai/etimad-plus-viewer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/badroneai/etimad-plus-viewer/issues"
+  },
+  "homepage": "https://github.com/badroneai/etimad-plus-viewer#readme",
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}
