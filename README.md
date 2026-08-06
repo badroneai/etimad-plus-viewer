@@ -52,13 +52,18 @@ python3 scripts/export_warehouse.py \
 ## بوابات النشر
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m pip install -r requirements-dev.txt
 python3 -m ruff check .
-python3 -m mypy .
+python3 -m mypy
+python3 -m unittest discover -s tests -v
 node --check assets/app.js
 node --test tests/test_app.cjs
-python3 scripts/check_data_contract.py --expect-snapshot-id "run_123_1"
+python3 scripts/check_data_contract.py --root .
 ```
+
+يشغّل `.github/workflows/ci.yml` البوابات نفسها لكل pull request إلى `main` من
+دون أي صلاحية أو خطوة نشر. يبقى النشر محصوراً في `.github/workflows/pages.yml`
+بعد الدمج إلى `main`.
 
 وبعد نشر GitHub Pages، يتحقق الأمر التالي من اللقطة وكل أصل مذكور فيها: JSON والحجم وSHA-256 والعدد وربط فهرس awarded بكل الشاردات. عند تأخر CDN يعيد الأصول الفاشلة فقط لتفادي إعادة تنزيل اللقطة كاملة:
 
