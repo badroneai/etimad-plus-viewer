@@ -98,5 +98,6 @@ python3 -m http.server 8080
 - [CLOUD_OPERATIONS.md](CLOUD_OPERATIONS.md): دورة النشر والتحقق والتشخيص.
 - [LANGUAGE_POLICY.md](LANGUAGE_POLICY.md): العربية للمنتج والتشغيل والإنجليزية للكود.
 - [CHANGELOG.md](CHANGELOG.md): سجل التغييرات المؤثرة.
+- [SECURITY.md](SECURITY.md): الإبلاغ الخاص عن الثغرات ونطاق الدعم.
 
 المشروع خاص وحقوقه محفوظة وفق [LICENSE](LICENSE).
