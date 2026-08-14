@@ -1,14 +1,14 @@
 {
   "schema": "kashaf.static-warehouse",
   "schema_version": 3,
-  "snapshot_id": "run_31806355763_1",
-  "generated_at": "2026-08-14T13:52:12.267149+00:00",
-  "as_of": "2026-08-14T13:50:24.359800+00:00",
+  "snapshot_id": "run_31832553469_1",
+  "generated_at": "2026-08-14T19:21:25.633089+00:00",
+  "as_of": "2026-08-14T19:19:40.252916+00:00",
   "source_times": {
     "phase0Baseline": "2026-07-18T14:32:40.909697+00:00",
     "phase0Open": "2026-07-18T05:42:06.284419+00:00",
     "phase0Awarded": "2026-07-18T14:32:40.909697+00:00",
-    "officialPeriodic": "2026-08-14T13:50:24.359800+00:00"
+    "officialPeriodic": "2026-08-14T19:19:40.252916+00:00"
   },
   "source": "Kashaf canonical merge: official Etimad periodic + Phase-0 baseline",
   "note": "البيانات الرسمية الأحدث تتقدم في الحقول غير الفارغة، مع حفظ تاريخ وعروض وترسيات خط الأساس.",
@@ -321,8 +321,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/01.json": {
-      "bytes": 2511591,
-      "sha256": "055df68bce0f357145c3aaf14afc30f4e34f5d6a8ebca816ecbf149b94ef0ddf",
+      "bytes": 2512168,
+      "sha256": "dab25c057c2af3968f09b34b3653bbcc752494c55f97604b8c20c62f6d4c444b",
       "contentType": "application/json",
       "records": 870,
       "role": "awarded_detail_shard"
@@ -335,8 +335,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/03.json": {
-      "bytes": 2507984,
-      "sha256": "68758e6318a30e8376939c30bb6c67d314cd69e3b3aaddc63f680f014fb4bb0c",
+      "bytes": 2508561,
+      "sha256": "190d699db1852c5cee1fdaf618fb1676edf140e735efee2dad89ad1e14c9aa5a",
       "contentType": "application/json",
       "records": 845,
       "role": "awarded_detail_shard"
@@ -356,8 +356,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/06.json": {
-      "bytes": 2428185,
-      "sha256": "fbb287417b28b1af5d87cf6a13184575164356bde26acdadffa4957dd59e4431",
+      "bytes": 2428762,
+      "sha256": "54d2eda0b505eb0d718e29b6d25faec6ff52dfc80c3f15a13049b80b3d5bb048",
       "contentType": "application/json",
       "records": 853,
       "role": "awarded_detail_shard"
@@ -517,8 +517,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/29.json": {
-      "bytes": 2319636,
-      "sha256": "bd5d3f4167f65ed4370e3be68b1514e1bee49ece631e908714a85a419ec0385f",
+      "bytes": 2320213,
+      "sha256": "ed714d1239cdb4d2a442ea1098e58ac3285595d62243ecf81fcf33d7836eb5d8",
       "contentType": "application/json",
       "records": 816,
       "role": "awarded_detail_shard"
@@ -636,8 +636,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/46.json": {
-      "bytes": 2553331,
-      "sha256": "26cbee2130d49b3fc20539535e4954fdd3dfb1a0617933cda3fd684583ccb062",
+      "bytes": 2553908,
+      "sha256": "755c23a1f6b6dcb124fbc1827a2e09dc7699915431ab8809e1ad78cc003435e8",
       "contentType": "application/json",
       "records": 891,
       "role": "awarded_detail_shard"
@@ -692,8 +692,8 @@
       "role": "awarded_detail_shard"
     },
     "awarded_details/54.json": {
-      "bytes": 2319792,
-      "sha256": "ae22249204b8e63d4db9683430c5349278c66f754cbc790572307761473a245f",
+      "bytes": 2320369,
+      "sha256": "7cf287c44664da721f129445d207b63f276fef388ee016e900379739244e3ac5",
       "contentType": "application/json",
       "records": 818,
       "role": "awarded_detail_shard"
@@ -763,7 +763,7 @@
     },
     "awarded_index.json": {
       "bytes": 2814,
-      "sha256": "3aa218421d6c6f8726e02ce6f5aa6a68dbb8392c6eb42069c0ffe84e8833c4f2",
+      "sha256": "0a42a3d2a15f7a0d3147bfe2ac9ec4e981a6b0aa7c40360ed4a85855d444337c",
       "contentType": "application/json",
       "role": "awarded_search_index_descriptor"
     },
@@ -775,8 +775,8 @@
       "role": "awarded_search_index_part"
     },
     "awarded_index_parts/01.json": {
-      "bytes": 1835130,
-      "sha256": "63b9b90b5eb24b5d9cc7ec0d007a8a8835e0ac4900a149004be8a5fde07f356d",
+      "bytes": 1835170,
+      "sha256": "65650e4b61238681e7aefcf266705fe1ca97a4ac8a612bcad8a2784e08848b4b",
       "contentType": "application/json",
       "records": 3522,
       "role": "awarded_search_index_part"
@@ -789,8 +789,8 @@
       "role": "awarded_search_index_part"
     },
     "awarded_index_parts/03.json": {
-      "bytes": 1783708,
-      "sha256": "db626031f61b47998bf9292f71d0fe012aa8b426e5417744c98943e76b6781fc",
+      "bytes": 1783748,
+      "sha256": "440645f7829a1ac888963fcd90858a2ae5c118414bef644fd5d2b042a11df2df",
       "contentType": "application/json",
       "records": 3415,
       "role": "awarded_search_index_part"
@@ -810,8 +810,8 @@
       "role": "awarded_search_index_part"
     },
     "awarded_index_parts/06.json": {
-      "bytes": 1761735,
-      "sha256": "2f17714a6152e93d44ced14922f6d1ca0e0fc93dd83615eaed197e6ca16ae0a5",
+      "bytes": 1761815,
+      "sha256": "9b74623430960c3bdcc4c3db5510a74ac4538a10e16adea97acb4fd6642b1f3f",
       "contentType": "application/json",
       "records": 3388,
       "role": "awarded_search_index_part"
@@ -859,15 +859,15 @@
       "role": "awarded_search_index_part"
     },
     "awarded_index_parts/13.json": {
-      "bytes": 1781097,
-      "sha256": "f479175667a556907edbaf099c6d8920f95d81169e5aa472a43c4793fec6ad96",
+      "bytes": 1781137,
+      "sha256": "223274da4b63740019426dc2262144e59f38cd2177101094cab7f8711ea63b1b",
       "contentType": "application/json",
       "records": 3418,
       "role": "awarded_search_index_part"
     },
     "awarded_index_parts/14.json": {
-      "bytes": 1821011,
-      "sha256": "c141aa365b6e6d3c1c25c93439f83c14eb5830b4a86d12412a60a3d709a525f3",
+      "bytes": 1821051,
+      "sha256": "444f1e55e5da8fda52eb5547479402ad790fbd2488619298dde4372e09f38873",
       "contentType": "application/json",
       "records": 3495,
       "role": "awarded_search_index_part"
@@ -881,14 +881,14 @@
     },
     "awarding.json": {
       "bytes": 154,
-      "sha256": "b161a7928932118741ddbb50e2a0e07737c8117e9bb2395d0a9fd2bc8fe66e41",
+      "sha256": "8c322c3f6029578fd0cbc9654e02efc1e6329cfd63479e17f8a1ac6e4dbaab55",
       "contentType": "application/json",
       "records": 0,
       "role": "tender_dataset"
     },
     "cancelled.json": {
       "bytes": 155,
-      "sha256": "0c7a51b42c85b144a929786087bd2d7070aa438755f6d6f38985a942808b868f",
+      "sha256": "54c212240235e645448ee61ab917550804324a5e023b95bed7c00182a1d8f1c9",
       "contentType": "application/json",
       "records": 0,
       "role": "tender_dataset"
@@ -922,8 +922,8 @@
       "records": 200
     },
     "examination.json": {
-      "bytes": 12634352,
-      "sha256": "b50b8d065e1af8675b56f75dd4085a6c1a6a0f8bc376ed419ae59b74923d1bd9",
+      "bytes": 12634926,
+      "sha256": "ce39dfdc8efff81bee76b5ff0f404bcf51fcb042e008df6a106f8fcf2e902ba3",
       "contentType": "application/json",
       "records": 2567,
       "role": "tender_dataset"
@@ -936,7 +936,7 @@
     },
     "fetch_status.json": {
       "bytes": 19794,
-      "sha256": "59cdea63cbcd43cf51268d9d84f691e512e491c21a9bf7fb19e6606e3436c114",
+      "sha256": "d03a92f19622ca798031b3cf7a453c7fd37270b7f7e08d522c7652a9bff6bba3",
       "contentType": "application/json",
       "role": "fetch_status"
     },
@@ -947,8 +947,8 @@
       "role": "retained_phase0_asset"
     },
     "open.json": {
-      "bytes": 5348819,
-      "sha256": "c831792e8cc6e812a80a06ff535845104858079dd516e1a3eb8a74256f5c0bed",
+      "bytes": 5367171,
+      "sha256": "020399e664fd29a5f1f1284be8effeefabb3d9745f93b1d0883fadc49c5821eb",
       "contentType": "application/json",
       "records": 1014,
       "role": "tender_dataset"
@@ -982,7 +982,7 @@
     },
     "unknown.json": {
       "bytes": 25626,
-      "sha256": "60da7bbea158a83b45021e89faef88ef8516e6e011e10c0162221e84f5a7eb5a",
+      "sha256": "8db2e210521708ac2f6b9f89fd68b55f4d9d844a499ebbc9a45cc90888450697",
       "contentType": "application/json",
       "records": 4,
       "role": "tender_dataset"
@@ -995,15 +995,15 @@
       "records": 300
     },
     "within_30.json": {
-      "bytes": 5225220,
-      "sha256": "658128d2023f5ae1897d1a259c15f1347b2bb383b2f32e5ca5560a065e0390f4",
+      "bytes": 5243572,
+      "sha256": "549ef7d7de3b0cf3d8dc05c75c191465dad02acba79d47a6f82c3bafca473849",
       "contentType": "application/json",
       "records": 994,
       "role": "tender_dataset"
     },
     "within_7.json": {
-      "bytes": 2651754,
-      "sha256": "f5dc9549049d71eda9996d728f6b2cd5d8a4b6364734ed467ca486f9d710f9e5",
+      "bytes": 2669884,
+      "sha256": "3487319b1e603452a38745cd849eba8b9e26977dfbe5cf3be7505aadc6791096",
       "contentType": "application/json",
       "records": 507,
       "role": "tender_dataset"
@@ -1017,12 +1017,12 @@
     "agencies_sitemap.json": 178719,
     "agencies_ssr.json": 44317,
     "awarded_details/00.json": 2520648,
-    "awarded_details/01.json": 2511591,
+    "awarded_details/01.json": 2512168,
     "awarded_details/02.json": 2476200,
-    "awarded_details/03.json": 2507984,
+    "awarded_details/03.json": 2508561,
     "awarded_details/04.json": 2644003,
     "awarded_details/05.json": 2588405,
-    "awarded_details/06.json": 2428185,
+    "awarded_details/06.json": 2428762,
     "awarded_details/07.json": 2592130,
     "awarded_details/08.json": 2526358,
     "awarded_details/09.json": 2477747,
@@ -1045,7 +1045,7 @@
     "awarded_details/26.json": 2450894,
     "awarded_details/27.json": 2541112,
     "awarded_details/28.json": 2546933,
-    "awarded_details/29.json": 2319636,
+    "awarded_details/29.json": 2320213,
     "awarded_details/30.json": 2509318,
     "awarded_details/31.json": 2345119,
     "awarded_details/32.json": 2455136,
@@ -1062,7 +1062,7 @@
     "awarded_details/43.json": 2441536,
     "awarded_details/44.json": 2441205,
     "awarded_details/45.json": 2626331,
-    "awarded_details/46.json": 2553331,
+    "awarded_details/46.json": 2553908,
     "awarded_details/47.json": 2375917,
     "awarded_details/48.json": 2501383,
     "awarded_details/49.json": 2576750,
@@ -1070,7 +1070,7 @@
     "awarded_details/51.json": 2370373,
     "awarded_details/52.json": 2612642,
     "awarded_details/53.json": 2366496,
-    "awarded_details/54.json": 2319792,
+    "awarded_details/54.json": 2320369,
     "awarded_details/55.json": 2437931,
     "awarded_details/56.json": 2519827,
     "awarded_details/57.json": 2304590,
@@ -1082,20 +1082,20 @@
     "awarded_details/63.json": 2546805,
     "awarded_index.json": 2814,
     "awarded_index_parts/00.json": 1795190,
-    "awarded_index_parts/01.json": 1835130,
+    "awarded_index_parts/01.json": 1835170,
     "awarded_index_parts/02.json": 1809236,
-    "awarded_index_parts/03.json": 1783708,
+    "awarded_index_parts/03.json": 1783748,
     "awarded_index_parts/04.json": 1857547,
     "awarded_index_parts/05.json": 1807328,
-    "awarded_index_parts/06.json": 1761735,
+    "awarded_index_parts/06.json": 1761815,
     "awarded_index_parts/07.json": 1823996,
     "awarded_index_parts/08.json": 1788546,
     "awarded_index_parts/09.json": 1774276,
     "awarded_index_parts/10.json": 1807383,
     "awarded_index_parts/11.json": 1801445,
     "awarded_index_parts/12.json": 1832780,
-    "awarded_index_parts/13.json": 1781097,
-    "awarded_index_parts/14.json": 1821011,
+    "awarded_index_parts/13.json": 1781137,
+    "awarded_index_parts/14.json": 1821051,
     "awarded_index_parts/15.json": 1760754,
     "awarding.json": 154,
     "cancelled.json": 155,
@@ -1103,18 +1103,18 @@
     "companies_api.json": 10893,
     "companies_sitemap.json": 6700334,
     "companies_ssr.json": 21956,
-    "examination.json": 12634352,
+    "examination.json": 12634926,
     "facets_open.json": 733,
     "fetch_status.json": 19794,
     "inventory.json": 7024,
-    "open.json": 5348819,
+    "open.json": 5367171,
     "ssr_tenders.json": 34704,
     "taxonomy_observed.json": 5653,
     "tender_refs_sitemap.json": 1257336,
     "types.json": 672,
     "unknown.json": 25626,
     "winnerfacet.json": 46801,
-    "within_30.json": 5225220,
-    "within_7.json": 2651754
+    "within_30.json": 5243572,
+    "within_7.json": 2669884
   }
 }
