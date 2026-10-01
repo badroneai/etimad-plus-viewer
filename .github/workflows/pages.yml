@@ -48,10 +48,16 @@ jobs:
           SIGNAL_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           SIGNAL_SHA: ${{ github.event.workflow_run.head_sha }}
           REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          remote="https://github.com/${REPOSITORY}.git"
-          source_ref="$(git ls-remote "${remote}" refs/heads/main | awk '{print $1}')"
+          # Use the job's existing read-only token, including for private repositories.
+          source_ref="$(timeout 20s gh api "repos/${REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          publication_tip() {
+            # An absent branch returns an empty list. Auth/API failures still fail closed.
+            timeout 20s gh api "repos/${REPOSITORY}/git/matching-refs/heads/publication/kashaf-data" \
+              --jq 'map(select(.ref == "refs/heads/publication/kashaf-data")) | first | .object.sha // empty'
+          }
           if [[ -z "${source_ref}" ]]; then
             echo "Unable to resolve protected main." >&2
             exit 1
@@ -70,7 +76,7 @@ jobs:
               || "${SIGNAL_REPOSITORY}" != "${REPOSITORY}" ]]; then
               should_deploy="false"
             else
-              tip="$(git ls-remote "${remote}" refs/heads/publication/kashaf-data | awk '{print $1}')"
+              tip="$(publication_tip)"
               if [[ -z "${tip}" || "${tip}" != "${SIGNAL_SHA}" ]]; then
                 echo "A newer publication superseded ${SIGNAL_SHA}; skipping stale deployment."
                 should_deploy="false"
@@ -82,9 +88,7 @@ jobs:
           elif [[ "${EVENT_NAME}" == "workflow_dispatch" && "${USE_MAIN_DATA}" == "true" ]]; then
             echo "Emergency compatibility rollback selected; packaging main/data."
           else
-            publication_ref="$(
-              git ls-remote "${remote}" refs/heads/publication/kashaf-data | awk '{print $1}'
-            )"
+            publication_ref="$(publication_tip)"
             if [[ -n "${publication_ref}" ]]; then
               use_publication="true"
               if [[ "${EVENT_NAME}" == "schedule" ]]; then
@@ -112,14 +116,19 @@ jobs:
           PUBLICATION_REF: ${{ steps.select.outputs.publication_ref }}
           REPOSITORY: ${{ github.repository }}
           SOURCE_REF: ${{ steps.select.outputs.source_ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           selector="${RUNNER_TEMP}/select_pages_publication.py"
-          curl --fail --silent --show-error --location --max-time 20 \
-            "https://raw.githubusercontent.com/${REPOSITORY}/${SOURCE_REF}/scripts/select_pages_publication.py" \
-            --output "${selector}"
+          publication_manifest="${RUNNER_TEMP}/publication-manifest.json"
+          timeout 20s gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${REPOSITORY}/contents/scripts/select_pages_publication.py?ref=${SOURCE_REF}" \
+            > "${selector}"
+          timeout 20s gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${REPOSITORY}/contents/data/manifest.json?ref=${PUBLICATION_REF}" \
+            > "${publication_manifest}"
           python "${selector}" \
-            --publication-url "https://raw.githubusercontent.com/${REPOSITORY}/${PUBLICATION_REF}/data/manifest.json" \
+            --publication-url "file://${publication_manifest}" \
             --live-url "https://badroneai.github.io/etimad-plus-viewer/data/manifest.json?publication=${PUBLICATION_REF}&poll=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --github-output "${GITHUB_OUTPUT}" \
             --summary-file "${GITHUB_STEP_SUMMARY}"
