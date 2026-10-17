@@ -1,8 +1,8 @@
 {
   "schema": "kashaf.static-warehouse",
   "schema_version": 3,
-  "snapshot_id": "run_39025620215_1",
-  "generated_at": "2026-10-17T10:42:57.620903+00:00",
+  "snapshot_id": "run_39045266009_1",
+  "generated_at": "2026-10-17T15:33:34.530389+00:00",
   "as_of": "2026-10-17T04:22:47.002313+00:00",
   "source_times": {
     "phase0Baseline": "2026-07-18T14:32:40.909697+00:00",
